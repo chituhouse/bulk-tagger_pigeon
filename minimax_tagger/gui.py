@@ -21,6 +21,7 @@ except ImportError:
 
 from .manifest import ManifestManager, ProcessStatus, ImageRecord
 from .config import settings
+from .utils.text_utils import split_chinese_english
 
 
 class BatchProcessingThread(QThread):
@@ -83,13 +84,17 @@ class BatchProcessingThread(QThread):
                     if result:
                         generated_prompt, success = result
                         if success:
+                            # 拆分中英文提示词
+                            prompt_en, prompt_cn = split_chinese_english(generated_prompt)
+
                             # 更新记录
-                            record.prompt_en = generated_prompt
+                            record.prompt_en = prompt_en
+                            record.prompt_cn = prompt_cn
                             record.status = ProcessStatus.APPROVED  # 自动通过，立即创建TXT文件
                             success_count += 1
                             
-                            # 立即创建TXT文件
-                            self._create_txt_file(image_path, generated_prompt)
+                            # 仅导出英文提示词
+                            self._create_txt_file(image_path, prompt_en)
                         
                         self.image_processed.emit(record.filepath, generated_prompt, success)
                     else:
@@ -548,15 +553,15 @@ class MainWindow(QMainWindow):
         prompt_group = QGroupBox("提示词")
         prompt_layout = QVBoxLayout(prompt_group)
         
-        # 当前提示词（只读）
+        # 当前提示词（可编辑）
         current_label = QLabel("当前提示词:")
         current_label.setFont(QFont("Arial", 9, QFont.Bold))
         prompt_layout.addWidget(current_label)
         
         self.current_prompt_edit = QTextEdit()
         self.current_prompt_edit.setMaximumHeight(100)
-        self.current_prompt_edit.setReadOnly(True)
-        self.current_prompt_edit.setStyleSheet("background-color: #f0f0f0; border: 1px solid #ccc;")
+        self.current_prompt_edit.setReadOnly(False)  # 改为可编辑
+        self.current_prompt_edit.setStyleSheet("background-color: #ffffff; border: 1px solid #aaa;")  # 改为可编辑样式
         prompt_layout.addWidget(self.current_prompt_edit)
         
         # 新生成的提示词（可编辑）
@@ -575,6 +580,10 @@ class MainWindow(QMainWindow):
         
         self.regenerate_btn = QPushButton("重新生成")
         button_layout.addWidget(self.regenerate_btn)
+        
+        self.save_current_btn = QPushButton("保存当前")
+        self.save_current_btn.setStyleSheet("background-color: #2196F3; color: white;")
+        button_layout.addWidget(self.save_current_btn)
         
         self.approve_btn = QPushButton("通过")
         self.approve_btn.setStyleSheet("background-color: #4CAF50; color: white;")
@@ -604,6 +613,7 @@ class MainWindow(QMainWindow):
         
         # 图片审阅相关
         self.image_list.currentItemChanged.connect(self.on_image_selected)
+        self.save_current_btn.clicked.connect(self.save_current_prompt)
         self.approve_btn.clicked.connect(self.approve_current_image)
         self.reject_btn.clicked.connect(self.reject_current_image)
         self.regenerate_btn.clicked.connect(self.regenerate_current_image)
@@ -963,6 +973,10 @@ class MainWindow(QMainWindow):
     ############################################
     def on_image_regenerated(self, img_path: str, prompt: str, success: bool):
         """重新生成完成回调"""
+        # 隐藏进度条
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
         # 重新启用按钮
         self.regenerate_btn.setEnabled(True)
         
@@ -1020,6 +1034,10 @@ class MainWindow(QMainWindow):
     
     def on_regeneration_error(self, error_message: str):
         """重新生成错误处理"""
+        # 隐藏进度条
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
         # 重新启用按钮
         self.regenerate_btn.setEnabled(True)
         
@@ -1108,8 +1126,10 @@ class MainWindow(QMainWindow):
     def _start_regeneration(self, image_path: Path, user_prompt: str):
         """启动重新生成过程"""
         try:
-            # 禁用按钮防止重复点击
+            # 禁用按钮防止重复点击，并显示进度条（不确定模式）
             self.regenerate_btn.setEnabled(False)
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)  # 不确定进度
             self.status_bar.showMessage(f"正在重新生成: {image_path.name}")
 
             # 创建并启动线程
@@ -1128,6 +1148,10 @@ class MainWindow(QMainWindow):
             self.regen_thread.start()
             
         except Exception as e:
+            # 隐藏进度条并重新启用按钮
+            self.progress_bar.setVisible(False)
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
             self.regenerate_btn.setEnabled(True)
             QMessageBox.critical(self, "启动失败", f"无法启动重新生成过程:\n{e}")
     
@@ -1152,8 +1176,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出失败:\n{e}")
     
-    def approve_current_image(self):
-        """通过当前图片 - 使用新生成的提示词"""
+    def save_current_prompt(self):
+        """保存当前提示词的修改"""
         current_item = self.image_list.currentItem()
         if not current_item:
             QMessageBox.warning(self, "警告", "请先选择一张图片")
@@ -1164,14 +1188,65 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "无法获取图片记录")
             return
             
-        # 检查是否有新生成的提示词
-        if not hasattr(record, 'temp_new_prompt') or not record.temp_new_prompt:
-            QMessageBox.warning(self, "警告", "没有新生成的提示词可以通过")
+        try:
+            # 获取当前提示词编辑框的内容
+            current_prompt_text = self.current_prompt_edit.toPlainText().strip()
+            
+            if not current_prompt_text:
+                QMessageBox.warning(self, "警告", "当前提示词不能为空")
+                return
+            
+            # 拆分中英文并保存
+            prompt_en, prompt_cn = split_chinese_english(current_prompt_text)
+            record.prompt_en = prompt_en
+            record.prompt_cn = prompt_cn
+            record.status = ProcessStatus.APPROVED
+            
+            # 创建TXT文件
+            image_folder = self.current_manifest_path.parent if self.current_manifest_path \
+                           else Path(self.folder_path_edit.text().strip())
+            self._create_txt_file_for_record(record, image_folder)
+            
+            # 保存更改到manifest
+            if self.manifest_manager:
+                self.manifest_manager.save_to_csv()
+                self.update_image_list()
+                
+            self.status_bar.showMessage(f"✅ 已保存当前提示词: {record.filepath}")
+            QMessageBox.information(self, "成功", "当前提示词已保存！")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"保存当前提示词时出错:\n{e}")
+    
+    def approve_current_image(self):
+        """通过当前图片 - 使用编辑框中的提示词"""
+        current_item = self.image_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "警告", "请先选择一张图片")
             return
             
+        record = current_item.data(Qt.UserRole)
+        if not record:
+            QMessageBox.warning(self, "警告", "无法获取图片记录")
+            return
+            
+        # 获取用户编辑后的提示词内容
+        current_prompt_text = self.current_prompt_edit.toPlainText().strip()
+        new_prompt_text = self.generated_prompt_edit.toPlainText().strip()
+        
+        # 检查是否有内容可以保存
+        if not current_prompt_text and not new_prompt_text:
+            QMessageBox.warning(self, "警告", "提示词不能为空")
+            return
+        
+        # 确定最终使用的提示词：优先使用新生成的，如果为空则使用当前的
+        final_prompt = new_prompt_text if new_prompt_text else current_prompt_text
+            
         try:
-            # 使用新生成的提示词替换原有的
-            record.prompt_en = record.temp_new_prompt
+            # 拆分中英文并保存
+            prompt_en, prompt_cn = split_chinese_english(final_prompt)
+            record.prompt_en = prompt_en
+            record.prompt_cn = prompt_cn
             record.status = ProcessStatus.APPROVED
             
             # 创建TXT文件
@@ -1202,7 +1277,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "错误", f"通过提示词时出错:\n{e}")
     
     def reject_current_image(self):
-        """拒绝当前图片 - 删除新生成的提示词"""
+        """拒绝当前图片 - 保存当前提示词，清除新生成的提示词"""
         current_item = self.image_list.currentItem()
         if not current_item:
             QMessageBox.warning(self, "警告", "请先选择一张图片")
@@ -1213,16 +1288,31 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "无法获取图片记录")
             return
             
-        # 检查是否有新生成的提示词
-        if not hasattr(record, 'temp_new_prompt') or not record.temp_new_prompt:
-            QMessageBox.warning(self, "警告", "没有新生成的提示词可以拒绝")
-            return
-            
         try:
-            # 清理临时属性（拒绝新提示词）
-            delattr(record, 'temp_new_prompt')
+            # 获取当前提示词编辑框的内容
+            current_prompt_text = self.current_prompt_edit.toPlainText().strip()
             
-            # 更新UI显示 - 恢复原有提示词
+            # 如果用户修改了当前提示词，保存修改
+            if current_prompt_text and current_prompt_text != record.prompt_en:
+                prompt_en, prompt_cn = split_chinese_english(current_prompt_text)
+                record.prompt_en = prompt_en
+                record.prompt_cn = prompt_cn
+                
+                # 创建TXT文件
+                image_folder = self.current_manifest_path.parent if self.current_manifest_path \
+                               else Path(self.folder_path_edit.text().strip())
+                self._create_txt_file_for_record(record, image_folder)
+                
+                # 保存更改到manifest
+                if self.manifest_manager:
+                    self.manifest_manager.save_to_csv()
+                    self.update_image_list()
+            
+            # 清理临时属性（拒绝新提示词）
+            if hasattr(record, 'temp_new_prompt'):
+                delattr(record, 'temp_new_prompt')
+            
+            # 更新UI显示 - 恢复到当前提示词，清空新生成区域
             self.current_prompt_edit.setPlainText(record.prompt_en)
             self.generated_prompt_edit.setPlainText("")
             
@@ -1231,7 +1321,7 @@ class MainWindow(QMainWindow):
             self.reject_btn.setEnabled(False)
             
             self.status_bar.showMessage(f"❌ 已拒绝新提示词: {record.filepath}")
-            QMessageBox.information(self, "拒绝", "新提示词已拒绝，保留原有提示词。")
+            QMessageBox.information(self, "拒绝", "新提示词已拒绝，当前提示词的修改已保存。")
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"拒绝提示词时出错:\n{e}")
