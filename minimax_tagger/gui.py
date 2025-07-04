@@ -14,7 +14,7 @@ try:
         QProgressBar, QMessageBox, QFileDialog, QCheckBox
     )
     from PySide6.QtCore import Qt, QThread, QTimer, Signal
-    from PySide6.QtGui import QPixmap, QFont
+    from PySide6.QtGui import QPixmap, QFont, QColor
 except ImportError:
     print("错误：未安装 PySide6，请运行: pip install PySide6")
     sys.exit(1)
@@ -84,17 +84,12 @@ class BatchProcessingThread(QThread):
                     if result:
                         generated_prompt, success = result
                         if success:
-                            # 拆分中英文提示词
-                            prompt_en, prompt_cn = split_chinese_english(generated_prompt)
-
-                            # 更新记录
-                            record.prompt_en = prompt_en
-                            record.prompt_cn = prompt_cn
-                            record.status = ProcessStatus.APPROVED  # 自动通过，立即创建TXT文件
+                            # 保存完整的提示词到记录中（包含中英文）
+                            record.prompt_en = generated_prompt
+                            record.status = ProcessStatus.PENDING  # 等待用户确认，不自动创建TXT文件
                             success_count += 1
                             
-                            # 仅导出英文提示词
-                            self._create_txt_file(image_path, prompt_en)
+                            # 不再自动创建TXT文件，等待用户确认后再创建
                         
                         self.image_processed.emit(record.filepath, generated_prompt, success)
                     else:
@@ -154,15 +149,7 @@ class BatchProcessingThread(QThread):
         except Exception as e:
             return f"API调用失败: {str(e)}", False
     
-    def _create_txt_file(self, image_path: Path, prompt: str):
-        """为图片创建对应的TXT文件"""
-        try:
-            txt_path = image_path.with_suffix(".txt")
-            with open(txt_path, 'w', encoding='utf-8') as f:
-                f.write(prompt)
-            print(f"✅ 创建TXT文件: {txt_path}")
-        except Exception as e:
-            print(f"❌ 创建TXT文件失败 {image_path}: {e}")
+# 已删除 _create_txt_file 函数 - 不再自动创建TXT文件
 
 
 ############################################
@@ -332,6 +319,9 @@ class MainWindow(QMainWindow):
         self.processing_thread: Optional[BatchProcessingThread] = None
         self.regen_thread: SingleImageProcessingThread | None = None   # 单张重新生成线程
         self.batch_regen_thread: BatchRegenerateThread | None = None   # 批量重新生成线程
+        
+        # 当前显示的图片记录
+        self.current_record = None
         
         # 尝试加载配置文件
         settings.load_from_file()
@@ -513,12 +503,29 @@ class MainWindow(QMainWindow):
         
         self.batch_regenerate_btn = QPushButton("批量重新生成")
         self.batch_regenerate_btn.setEnabled(False)
+        self.batch_regenerate_btn.setVisible(False)  # 初始时隐藏，直到第一次批量处理完成
         batch_control_layout.addWidget(self.batch_regenerate_btn)
         
         batch_control_layout.addStretch()
         left_layout.addLayout(batch_control_layout)
         
         self.image_list = QListWidget()
+        # 设置列表项的样式，避免黑色背景问题
+        self.image_list.setStyleSheet("""
+            QListWidget::item:selected {
+                background-color: #ADD8E6;  /* 浅蓝色 */
+                border: 1px solid #87CEEB;
+                color: black;
+            }
+            QListWidget::item:hover {
+                background-color: #E6F3FF;  /* 更浅的蓝色 */
+                color: black;
+            }
+            QListWidget::item {
+                color: black;
+                background-color: white;
+            }
+        """)
         left_layout.addWidget(self.image_list)
         
         splitter.addWidget(left_group)
@@ -541,6 +548,21 @@ class MainWindow(QMainWindow):
         preview_group = QGroupBox("图片预览")
         preview_layout = QVBoxLayout(preview_group)
         
+        # 文件名显示标签
+        self.current_filename_label = QLabel("未选择文件")
+        self.current_filename_label.setAlignment(Qt.AlignCenter)
+        self.current_filename_label.setStyleSheet("""
+            QLabel {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                padding: 5px;
+                font-weight: bold;
+                color: #333;
+            }
+        """)
+        preview_layout.addWidget(self.current_filename_label)
+        
+        # 图片预览
         self.image_preview = QLabel("选择图片查看预览")
         self.image_preview.setMinimumHeight(200)
         self.image_preview.setAlignment(Qt.AlignCenter)
@@ -685,10 +707,18 @@ class MainWindow(QMainWindow):
     def on_image_selected(self, current_item, previous_item):
         """当选择图片时的处理"""
         if not current_item:
+            self.current_record = None
+            self.current_filename_label.setText("未选择文件")
             return
         
         record = current_item.data(Qt.UserRole)
         if record:
+            # 更新当前记录
+            self.current_record = record
+            
+            # 更新文件名显示
+            self.current_filename_label.setText(record.filepath)
+            
             # 显示当前提示词（原始）
             self.current_prompt_edit.setPlainText(record.prompt_en)
             
@@ -707,6 +737,15 @@ class MainWindow(QMainWindow):
             
             # 加载和显示图片预览
             self.load_image_preview(record.filepath)
+            
+            # 更新列表项的视觉状态
+            self.update_list_item_highlight(current_item, previous_item)
+    
+    def update_list_item_highlight(self, current_item, previous_item):
+        """更新列表项的高亮显示"""
+        # 使用QListWidget的内置选中机制，样式已在初始化时设置
+        if current_item:
+            self.image_list.setCurrentItem(current_item)
     
     def load_image_preview(self, filepath: str):
         """加载并显示图片预览"""
@@ -955,6 +994,10 @@ class MainWindow(QMainWindow):
             f"批量处理已完成！\n\n成功处理: {success_count} 张\n总计: {total_count} 张"
         )
         
+        # 第一次批量处理完成后，显示批量重新生成按钮
+        if not self.batch_regenerate_btn.isVisible():
+            self.batch_regenerate_btn.setVisible(True)
+        
         # 更新图片列表
         self.update_image_list()
     
@@ -1050,35 +1093,19 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("重新生成失败")
         QMessageBox.critical(self, "重新生成错误", error_message)
     
-    def _create_txt_file_for_record(self, record: 'ImageRecord', base_path: Path):
-        """为记录创建TXT文件"""
-        try:
-            image_path = base_path / record.filepath
-            txt_path = image_path.with_suffix(".txt")
-            
-            with open(txt_path, 'w', encoding='utf-8') as f:
-                f.write(record.prompt_en)
-            
-            print(f"✅ 自动创建TXT文件: {txt_path}")
-            
-        except Exception as e:
-            print(f"❌ 创建TXT文件失败 {record.filepath}: {e}")
+# 已删除 _create_txt_file_for_record 函数 - 统一使用 manifest.export_to_txt_files()
     
     ############################################
     # 3. 完善的重新生成功能
     ############################################
     def regenerate_current_image(self):
         """重新生成当前图片的提示词"""
-        # 检查是否有选中的图片
-        current_item = self.image_list.currentItem()
-        if not current_item:
+        # 检查是否有当前显示的图片
+        if not self.current_record:
             QMessageBox.warning(self, "警告", "请先选择一张图片")
             return
         
-        record = current_item.data(Qt.UserRole)
-        if not record:
-            QMessageBox.warning(self, "警告", "无法获取图片记录")
-            return
+        record = self.current_record
 
         # 检查是否正在处理
         if self.regen_thread and self.regen_thread.isRunning():
@@ -1165,28 +1192,42 @@ class MainWindow(QMainWindow):
             self.regen_thread = None
     
     def export_txt_files(self):
-        """导出 TXT 文件"""
+        """导出 TXT 文件 - 直接根据CSV表格生成，不需要确认"""
         if not self.manifest_manager:
             QMessageBox.warning(self, "警告", "请先加载 manifest 文件")
             return
         
+        # 统计所有有提示词的记录（不区分状态）
+        records_with_prompts = [r for r in self.manifest_manager.records if r.prompt_en.strip()]
+        total_count = len(self.manifest_manager.records)
+        
+        if not records_with_prompts:
+            QMessageBox.warning(self, "警告", 
+                f"没有提示词可以导出\n\n"
+                f"总计：{total_count} 个记录\n"
+                f"有提示词：{len(records_with_prompts)} 个\n\n"
+                f"请先进行批量处理生成提示词")
+            return
+        
         try:
+            # 直接导出所有有提示词的记录
             exported_count = self.manifest_manager.export_to_txt_files()
-            QMessageBox.information(self, "成功", f"成功导出 {exported_count} 个 TXT 文件")
+            
+            self.status_bar.showMessage(f"导出完成: {exported_count} 个TXT文件")
+            QMessageBox.information(self, "导出成功", 
+                f"成功导出 {exported_count} 个 TXT 文件\n\n"
+                f"导出的TXT文件只包含英文部分，\n"
+                f"可直接用于LoRA训练。")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败:\n{e}")
+            QMessageBox.critical(self, "导出失败", f"导出TXT文件时出错:\n{e}")
     
     def save_current_prompt(self):
         """保存当前提示词的修改"""
-        current_item = self.image_list.currentItem()
-        if not current_item:
+        if not self.current_record:
             QMessageBox.warning(self, "警告", "请先选择一张图片")
             return
             
-        record = current_item.data(Qt.UserRole)
-        if not record:
-            QMessageBox.warning(self, "警告", "无法获取图片记录")
-            return
+        record = self.current_record
             
         try:
             # 获取当前提示词编辑框的内容
@@ -1196,16 +1237,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "警告", "当前提示词不能为空")
                 return
             
-            # 拆分中英文并保存
-            prompt_en, prompt_cn = split_chinese_english(current_prompt_text)
-            record.prompt_en = prompt_en
-            record.prompt_cn = prompt_cn
+            # 保存完整的提示词到记录中（包含中英文）
+            record.prompt_en = current_prompt_text
             record.status = ProcessStatus.APPROVED
             
-            # 创建TXT文件
-            image_folder = self.current_manifest_path.parent if self.current_manifest_path \
-                           else Path(self.folder_path_edit.text().strip())
-            self._create_txt_file_for_record(record, image_folder)
+            # 不立即创建TXT文件，等待用户统一导出
             
             # 保存更改到manifest
             if self.manifest_manager:
@@ -1220,15 +1256,11 @@ class MainWindow(QMainWindow):
     
     def approve_current_image(self):
         """通过当前图片 - 使用编辑框中的提示词"""
-        current_item = self.image_list.currentItem()
-        if not current_item:
+        if not self.current_record:
             QMessageBox.warning(self, "警告", "请先选择一张图片")
             return
             
-        record = current_item.data(Qt.UserRole)
-        if not record:
-            QMessageBox.warning(self, "警告", "无法获取图片记录")
-            return
+        record = self.current_record
             
         # 获取用户编辑后的提示词内容
         current_prompt_text = self.current_prompt_edit.toPlainText().strip()
@@ -1243,16 +1275,11 @@ class MainWindow(QMainWindow):
         final_prompt = new_prompt_text if new_prompt_text else current_prompt_text
             
         try:
-            # 拆分中英文并保存
-            prompt_en, prompt_cn = split_chinese_english(final_prompt)
-            record.prompt_en = prompt_en
-            record.prompt_cn = prompt_cn
+            # 保存完整的提示词到记录中（包含中英文）
+            record.prompt_en = final_prompt
             record.status = ProcessStatus.APPROVED
             
-            # 创建TXT文件
-            image_folder = self.current_manifest_path.parent if self.current_manifest_path \
-                           else Path(self.folder_path_edit.text().strip())
-            self._create_txt_file_for_record(record, image_folder)
+            # 不立即创建TXT文件，等待用户统一导出
             
             # 清理临时属性
             delattr(record, 'temp_new_prompt')
@@ -1278,15 +1305,11 @@ class MainWindow(QMainWindow):
     
     def reject_current_image(self):
         """拒绝当前图片 - 保存当前提示词，清除新生成的提示词"""
-        current_item = self.image_list.currentItem()
-        if not current_item:
+        if not self.current_record:
             QMessageBox.warning(self, "警告", "请先选择一张图片")
             return
             
-        record = current_item.data(Qt.UserRole)
-        if not record:
-            QMessageBox.warning(self, "警告", "无法获取图片记录")
-            return
+        record = self.current_record
             
         try:
             # 获取当前提示词编辑框的内容
@@ -1294,14 +1317,11 @@ class MainWindow(QMainWindow):
             
             # 如果用户修改了当前提示词，保存修改
             if current_prompt_text and current_prompt_text != record.prompt_en:
-                prompt_en, prompt_cn = split_chinese_english(current_prompt_text)
-                record.prompt_en = prompt_en
-                record.prompt_cn = prompt_cn
+                # 保存完整的提示词到记录中（包含中英文）
+                record.prompt_en = current_prompt_text
+                record.status = ProcessStatus.APPROVED  # 标记为已确认
                 
-                # 创建TXT文件
-                image_folder = self.current_manifest_path.parent if self.current_manifest_path \
-                               else Path(self.folder_path_edit.text().strip())
-                self._create_txt_file_for_record(record, image_folder)
+                # 不立即创建TXT文件，等待用户统一导出
                 
                 # 保存更改到manifest
                 if self.manifest_manager:
@@ -1392,30 +1412,72 @@ class MainWindow(QMainWindow):
     ############################################
     def on_select_all_changed(self, state):
         """全选/全不选复选框状态改变"""
-        is_checked = state == Qt.CheckState.Checked
+        # 获取当前选中的数量
+        selected_count = self.get_selected_records_count()
+        total_count = self.image_list.count()
         
+        # 判断应该执行的操作：
+        # 1. 如果当前没有选中任何项，或者是部分选中状态，则全选
+        # 2. 如果当前全部选中，则全不选
+        if selected_count == 0 or state == Qt.CheckState.PartiallyChecked:
+            # 全选
+            target_checked = True
+        elif selected_count == total_count:
+            # 全不选
+            target_checked = False
+        else:
+            # 部分选中时，默认全选
+            target_checked = True
+        
+        # 临时断开单个复选框的信号，避免循环触发
         for i in range(self.image_list.count()):
             item = self.image_list.item(i)
             widget = self.image_list.itemWidget(item)
             if widget:
-                checkbox = widget.findChild(QCheckBox)
-                if checkbox:
-                    checkbox.setChecked(is_checked)
+                # 更直接的方法：获取布局中的第一个复选框
+                layout = widget.layout()
+                if layout and layout.count() > 0:
+                    checkbox_widget = layout.itemAt(0).widget()
+                    if isinstance(checkbox_widget, QCheckBox):
+                        checkbox_widget.blockSignals(True)
+                        checkbox_widget.setChecked(target_checked)
+                        checkbox_widget.blockSignals(False)
+        
+        # 更新全选复选框的状态
+        self.select_all_checkbox.blockSignals(True)
+        if target_checked:
+            self.select_all_checkbox.setCheckState(Qt.CheckState.Checked)
+        else:
+            self.select_all_checkbox.setCheckState(Qt.CheckState.Unchecked)
+        self.select_all_checkbox.blockSignals(False)
+        
+        # 更新批量重新生成按钮状态
+        final_selected_count = self.get_selected_records_count()
+        if self.batch_regenerate_btn.isVisible():
+            self.batch_regenerate_btn.setEnabled(final_selected_count > 0)
     
     def on_item_checkbox_changed(self):
         """单个复选框状态改变"""
-        # 更新批量重新生成按钮状态
+        # 更新批量重新生成按钮状态（只在按钮可见时更新）
         selected_count = self.get_selected_records_count()
-        self.batch_regenerate_btn.setEnabled(selected_count > 0)
+        if self.batch_regenerate_btn.isVisible():
+            self.batch_regenerate_btn.setEnabled(selected_count > 0)
         
         # 更新全选复选框状态
         total_count = self.image_list.count()
+        
+        # 临时断开全选复选框的信号，避免循环触发
+        self.select_all_checkbox.blockSignals(True)
+        
         if selected_count == 0:
-            self.select_all_checkbox.setChecked(False)
+            self.select_all_checkbox.setCheckState(Qt.CheckState.Unchecked)
         elif selected_count == total_count:
-            self.select_all_checkbox.setChecked(True)
+            self.select_all_checkbox.setCheckState(Qt.CheckState.Checked)
         else:
             self.select_all_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
+            
+        # 恢复信号
+        self.select_all_checkbox.blockSignals(False)
     
     def get_selected_records_count(self):
         """获取选中的记录数量"""
@@ -1424,9 +1486,12 @@ class MainWindow(QMainWindow):
             item = self.image_list.item(i)
             widget = self.image_list.itemWidget(item)
             if widget:
-                checkbox = widget.findChild(QCheckBox)
-                if checkbox and checkbox.isChecked():
-                    count += 1
+                # 更直接的方法：获取布局中的第一个复选框
+                layout = widget.layout()
+                if layout and layout.count() > 0:
+                    checkbox_widget = layout.itemAt(0).widget()
+                    if isinstance(checkbox_widget, QCheckBox) and checkbox_widget.isChecked():
+                        count += 1
         return count
     
     def get_selected_records(self):
@@ -1436,11 +1501,14 @@ class MainWindow(QMainWindow):
             item = self.image_list.item(i)
             widget = self.image_list.itemWidget(item)
             if widget:
-                checkbox = widget.findChild(QCheckBox)
-                if checkbox and checkbox.isChecked():
-                    record = checkbox.property("record")
-                    if record:
-                        selected_records.append(record)
+                # 更直接的方法：获取布局中的第一个复选框
+                layout = widget.layout()
+                if layout and layout.count() > 0:
+                    checkbox_widget = layout.itemAt(0).widget()
+                    if isinstance(checkbox_widget, QCheckBox) and checkbox_widget.isChecked():
+                        record = checkbox_widget.property("record")
+                        if record:
+                            selected_records.append(record)
         return selected_records
     
     def start_batch_regenerate(self):

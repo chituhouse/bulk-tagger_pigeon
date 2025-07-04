@@ -1,5 +1,1 @@
-中文提示词：
-这张图片展示了一位身穿古代服饰的人物。人物头戴精致的金色冠冕，冠冕上镶嵌着一颗珍珠，显得庄重而威严。人物身穿深红色的长袍，外披黑色绣有金色花纹的披肩，整体服饰显得高贵典雅。背景为单一的灰色，突出人物的主体地位，使观者的注意力集中在服饰和人物本身。构图简洁，人物居中站立，给人一种肃穆和庄重的感觉。
-
-英文提示词：
-This image depicts a person dressed in traditional ancient attire. The individual wears an ornate golden crown adorned with a pearl, exuding a sense of solemnity and authority. The person is clad in a deep red robe, overlaid with a black shawl embroidered with golden patterns, giving an overall impression of nobility and elegance. The background is a plain grey, which emphasizes the subject and draws the viewer's attention to the attire and the person. The composition is simple, with the person standing centrally, conveying a sense of dignity and solemnity.
+Ancient attire, noble crown, deep red robe, black shawl, golden cloud patterns, gray background, solemn and dignified, classical style.

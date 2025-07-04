@@ -136,7 +136,8 @@ class ManifestManager:
     
     def export_to_txt_files(self, output_dir: Optional[Path] = None) -> int:
         """
-        导出已通过的记录为同名 .txt 文件（供 LoRA 训练使用）
+        导出所有有提示词的记录为同名 .txt 文件（供 LoRA 训练使用）
+        只导出英文部分
         
         Args:
             output_dir: 输出目录，如果为 None 则在图片文件同级目录
@@ -144,25 +145,32 @@ class ManifestManager:
         Returns:
             导出的文件数量
         """
-        approved_records = self.get_approved_records()
+        from .utils.text_utils import split_chinese_english
+        
+        # 导出所有有提示词的记录，不区分状态
+        records_with_prompts = [r for r in self.records if r.prompt_en.strip()]
         exported_count = 0
         
-        for record in approved_records:
-            if not record.prompt_en:
-                continue
-                
+        # 获取manifest文件所在目录作为基础目录
+        base_dir = self.manifest_path.parent
+        
+        for record in records_with_prompts:
             # 确定 txt 文件路径
-            image_path = Path(record.filepath)
             if output_dir:
+                # 如果指定了输出目录，使用指定目录
+                image_path = Path(record.filepath)
                 txt_path = output_dir / (image_path.stem + ".txt")
                 txt_path.parent.mkdir(parents=True, exist_ok=True)
             else:
+                # 在图片文件的同级目录创建TXT文件
+                image_path = base_dir / record.filepath
                 txt_path = image_path.with_suffix(".txt")
             
-            # 写入提示词
+            # 分离中英文，只写入英文部分
             try:
+                prompt_en, prompt_cn = split_chinese_english(record.prompt_en)
                 with open(txt_path, 'w', encoding='utf-8') as f:
-                    f.write(record.prompt_en)
+                    f.write(prompt_en)
                 exported_count += 1
                 print(f"导出: {txt_path}")
             except Exception as e:
