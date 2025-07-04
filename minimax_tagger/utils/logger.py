@@ -64,4 +64,4 @@ def get_logger(name: str = __name__):
 
 
 # 默认设置
-setup_logger() 
+setup_logger(level="INFO") 

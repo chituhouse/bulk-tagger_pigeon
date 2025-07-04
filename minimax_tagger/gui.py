@@ -11,10 +11,11 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QSplitter, QTextEdit, QPlainTextEdit, QPushButton, QLabel,
         QListWidget, QListWidgetItem, QFrame, QGroupBox, QLineEdit,
-        QProgressBar, QMessageBox, QFileDialog, QCheckBox
+        QProgressBar, QMessageBox, QFileDialog, QCheckBox, QMenuBar,
+        QMenu, QSizePolicy
     )
     from PySide6.QtCore import Qt, QThread, QTimer, Signal
-    from PySide6.QtGui import QPixmap, QFont, QColor
+    from PySide6.QtGui import QPixmap, QFont, QColor, QAction, QKeySequence
 except ImportError:
     print("错误：未安装 PySide6，请运行: pip install PySide6")
     sys.exit(1)
@@ -198,20 +199,17 @@ class SingleImageProcessingThread(QThread):
             if self._should_stop:
                 return
                 
-            if results:
-                _, prompt, success = results[0]
-                self.finished.emit(str(self.image_path), prompt, success)
+            if results and len(results) > 0:
+                _, generated_prompt, success = results[0]
+                self.finished.emit(str(self.image_path), generated_prompt, success)
             else:
-                self.finished.emit(str(self.image_path), "API 返回空结果", False)
-
+                self.finished.emit(str(self.image_path), "API返回空结果", False)
+                
         except Exception as e:
-            if not self._should_stop:
-                self.error.emit(f"单张处理失败: {e}")
+            self.error.emit(f"处理图片时出错: {str(e)}")
         finally:
-            try: 
-                loop.close()
-            except Exception: 
-                pass
+            loop.close() if 'loop' in locals() else None
+
 
 ############################################
 # 2. 新增 —— 批量重新生成线程
@@ -229,33 +227,35 @@ class BatchRegenerateThread(QThread):
         self.image_paths = image_paths
         self.prompt_template = prompt_template
         self.system_prompt = system_prompt
-        self._should_stop = False
+        self.should_stop = False
         
     def stop_processing(self):
         """停止处理"""
-        self._should_stop = True
+        self.should_stop = True
         
     def run(self):
-        """批量重新生成主逻辑"""
+        """主处理逻辑"""
         try:
             total_count = len(self.image_paths)
             success_count = 0
             
+            # 逐张处理图片
             for i, image_path in enumerate(self.image_paths):
-                if self._should_stop:
+                if self.should_stop:
                     break
                     
                 # 更新进度
-                self.progress_updated.emit(i + 1, total_count, image_path.name)
+                self.progress_updated.emit(i + 1, total_count, str(image_path))
                 
                 try:
-                    # 处理单张图片
-                    result = self._process_single_image(image_path)
+                    # 调用异步API处理单张图片
+                    result = self._process_single_image(Path(image_path))
                     
                     if result:
                         generated_prompt, success = result
                         if success:
                             success_count += 1
+                        
                         self.image_regenerated.emit(str(image_path), generated_prompt, success)
                     else:
                         self.image_regenerated.emit(str(image_path), "处理失败", False)
@@ -264,16 +264,16 @@ class BatchRegenerateThread(QThread):
                     error_msg = f"处理图片时出错: {str(e)}"
                     self.image_regenerated.emit(str(image_path), error_msg, False)
                     
-            # 批量处理完成
+            # 处理完成
             self.batch_finished.emit(success_count, total_count)
             
         except Exception as e:
             self.error_occurred.emit(f"批量重新生成过程中发生错误: {str(e)}")
     
     def _process_single_image(self, image_path: Path):
-        """处理单张图片"""
+        """处理单张图片 - 在新的事件循环中运行异步代码"""
         try:
-            # 创建新的事件循环
+            # 创建新的事件循环（因为在线程中）
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
@@ -309,22 +309,60 @@ class BatchRegenerateThread(QThread):
             return f"API调用失败: {str(e)}", False
 
 
+############################################
+# 3. 新增 —— 自适应图片预览标签
+############################################
+class AdaptiveImageLabel(QLabel):
+    """自适应图片预览标签，支持窗口缩放时等比例缩放图片"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.original_pixmap = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("border: 1px solid gray;")
+        self.setMinimumSize(200, 200)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+    def set_pixmap(self, pixmap):
+        """设置原始图片"""
+        self.original_pixmap = pixmap
+        self.update_display()
+        
+    def update_display(self):
+        """更新图片显示"""
+        if self.original_pixmap and not self.original_pixmap.isNull():
+            # 根据当前控件大小缩放图片
+            scaled_pixmap = self.original_pixmap.scaled(
+                self.size(), 
+                Qt.AspectRatioMode.KeepAspectRatio, 
+                Qt.TransformationMode.SmoothTransformation
+            )
+            super().setPixmap(scaled_pixmap)
+        
+    def resizeEvent(self, event):
+        """重载resize事件，窗口大小变化时重新缩放图片"""
+        super().resizeEvent(event)
+        self.update_display()
+
+
+############################################
+# 4. 主窗口类
+############################################
 class MainWindow(QMainWindow):
     """主窗口类"""
     
     def __init__(self):
         super().__init__()
-        self.manifest_manager: Optional[ManifestManager] = None
-        self.current_manifest_path: Optional[Path] = None
-        self.processing_thread: Optional[BatchProcessingThread] = None
-        self.regen_thread: SingleImageProcessingThread | None = None   # 单张重新生成线程
-        self.batch_regen_thread: BatchRegenerateThread | None = None   # 批量重新生成线程
+        self.manifest_manager = None
+        self.current_manifest_path = None
+        self.current_record = None  # 当前显示的图片记录
+        self.batch_thread = None
+        self.single_regen_thread = None
+        self.batch_regen_thread = None
         
-        # 当前显示的图片记录
-        self.current_record = None
-        
-        # 尝试加载配置文件
-        settings.load_from_file()
+        # 字体缩放相关
+        self.font_scale = 1.0
+        self.base_font_size = 9
         
         self.init_ui()
         self.setup_connections()
@@ -332,15 +370,23 @@ class MainWindow(QMainWindow):
     
     def init_ui(self):
         """初始化用户界面"""
-        self.setWindowTitle("MiniMax Tagger v1.0.0 - 批量反推提示词工具")
+        self.setWindowTitle("MiniMax Tagger v0.9.0 - 批量反推提示词工具")
         self.setMinimumSize(1200, 800)
+        
+        # 设置窗口大小策略为可扩展
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        # 创建菜单栏
+        self.create_menu_bar()
         
         # 创建中央部件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        central_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # 主布局
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
         
         # 顶部控制区
         control_frame = self.create_control_panel()
@@ -348,19 +394,73 @@ class MainWindow(QMainWindow):
         
         # 主要工作区
         work_splitter = self.create_work_area()
-        main_layout.addWidget(work_splitter)
+        main_layout.addWidget(work_splitter, 1)  # 设置stretch factor为1，让工作区占据大部分空间
         
         # 底部状态栏
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("就绪")
+        
+    def create_menu_bar(self):
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        
+        # 视图菜单
+        view_menu = menubar.addMenu("视图(&V)")
+        
+        # 字体放大
+        zoom_in_action = QAction("放大字体(&+)", self)
+        zoom_in_action.setShortcut(QKeySequence("Ctrl+="))
+        zoom_in_action.triggered.connect(self.zoom_in_font)
+        view_menu.addAction(zoom_in_action)
+        
+        # 字体缩小
+        zoom_out_action = QAction("缩小字体(&-)", self)
+        zoom_out_action.setShortcut(QKeySequence("Ctrl+-"))
+        zoom_out_action.triggered.connect(self.zoom_out_font)
+        view_menu.addAction(zoom_out_action)
+        
+        # 重置字体
+        reset_font_action = QAction("重置字体(&0)", self)
+        reset_font_action.setShortcut(QKeySequence("Ctrl+0"))
+        reset_font_action.triggered.connect(self.reset_font)
+        view_menu.addAction(reset_font_action)
+        
+    def zoom_in_font(self):
+        """放大字体"""
+        self.font_scale = min(self.font_scale + 0.1, 2.0)  # 最大2倍
+        self.update_font_sizes()
+        
+    def zoom_out_font(self):
+        """缩小字体"""
+        self.font_scale = max(self.font_scale - 0.1, 0.5)  # 最小0.5倍
+        self.update_font_sizes()
+        
+    def reset_font(self):
+        """重置字体大小"""
+        self.font_scale = 1.0
+        self.update_font_sizes()
+        
+    def update_font_sizes(self):
+        """更新所有控件的字体大小"""
+        new_size = int(self.base_font_size * self.font_scale)
+        font = QFont()
+        font.setPointSize(new_size)
+        
+        # 更新主窗口字体
+        self.setFont(font)
+        
+        # 更新状态栏
+        self.status_bar.showMessage(f"字体大小: {new_size}pt (缩放: {self.font_scale:.1f}x)")
     
     def create_control_panel(self) -> QFrame:
         """创建顶部控制面板"""
         frame = QFrame()
         frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        frame.setMaximumHeight(160)  # 增加高度以容纳新功能
+        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # 移除固定高度限制，让内容自动决定高度
         
         layout = QVBoxLayout(frame)
+        layout.setContentsMargins(10, 10, 10, 10)
         
         # 第一行：文件夹选择
         folder_layout = QHBoxLayout()
@@ -368,14 +468,15 @@ class MainWindow(QMainWindow):
         
         self.folder_path_edit = QLineEdit()
         self.folder_path_edit.setPlaceholderText("选择包含图片的文件夹...")
+        self.folder_path_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         folder_layout.addWidget(self.folder_path_edit)
         
         self.browse_folder_btn = QPushButton("浏览文件夹")
-        self.browse_folder_btn.setMaximumWidth(100)
+        self.browse_folder_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         folder_layout.addWidget(self.browse_folder_btn)
         
         self.create_manifest_btn = QPushButton("创建Manifest")
-        self.create_manifest_btn.setMaximumWidth(100)
+        self.create_manifest_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         folder_layout.addWidget(self.create_manifest_btn)
         
         layout.addLayout(folder_layout)
@@ -386,14 +487,15 @@ class MainWindow(QMainWindow):
         
         self.manifest_path_edit = QLineEdit()
         self.manifest_path_edit.setPlaceholderText("选择现有的 manifest.csv 文件...")
+        self.manifest_path_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         file_layout.addWidget(self.manifest_path_edit)
         
         self.browse_btn = QPushButton("浏览...")
-        self.browse_btn.setMaximumWidth(80)
+        self.browse_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         file_layout.addWidget(self.browse_btn)
         
         self.load_btn = QPushButton("加载")
-        self.load_btn.setMaximumWidth(60)
+        self.load_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         file_layout.addWidget(self.load_btn)
         
         layout.addLayout(file_layout)
@@ -405,16 +507,18 @@ class MainWindow(QMainWindow):
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setPlaceholderText("输入 MiniMax API Key...")
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         api_layout.addWidget(self.api_key_edit)
         
         api_layout.addWidget(QLabel("Group ID:"))
         
         self.group_id_edit = QLineEdit()
         self.group_id_edit.setPlaceholderText("Group ID (可选)")
+        self.group_id_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         api_layout.addWidget(self.group_id_edit)
         
         self.save_config_btn = QPushButton("保存配置")
-        self.save_config_btn.setMaximumWidth(80)
+        self.save_config_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         api_layout.addWidget(self.save_config_btn)
         
         layout.addLayout(api_layout)
@@ -425,21 +529,38 @@ class MainWindow(QMainWindow):
         self.execute_btn = QPushButton("批量处理图片")
         self.execute_btn.setMinimumHeight(35)
         self.execute_btn.setEnabled(False)  # 初始禁用，加载manifest后启用
+        self.execute_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         action_layout.addWidget(self.execute_btn)
         
         self.pause_btn = QPushButton("停止处理")
         self.pause_btn.setMinimumHeight(35)
         self.pause_btn.setEnabled(False)
+        self.pause_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         action_layout.addWidget(self.pause_btn)
+        
+        # 保存和导出按钮布局
+        save_export_layout = QHBoxLayout()
+        
+        self.save_all_btn = QPushButton("刷新保存")
+        self.save_all_btn.setMinimumHeight(35)
+        self.save_all_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.save_all_btn.setStyleSheet("background-color: #2196F3; color: white;")
+        self.save_all_btn.setToolTip("手动刷新保存所有数据到CSV文件")
+        save_export_layout.addWidget(self.save_all_btn)
         
         self.export_txt_btn = QPushButton("导出 TXT")
         self.export_txt_btn.setMinimumHeight(35)
-        action_layout.addWidget(self.export_txt_btn)
+        self.export_txt_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.export_txt_btn.setToolTip("将所有提示词导出为TXT文件")
+        save_export_layout.addWidget(self.export_txt_btn)
+        
+        action_layout.addLayout(save_export_layout)
         
         # 进度条
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimumHeight(25)
         self.progress_bar.setVisible(False)  # 初始隐藏
+        self.progress_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         action_layout.addWidget(self.progress_bar)
         
         layout.addLayout(action_layout)
@@ -449,6 +570,7 @@ class MainWindow(QMainWindow):
     def create_work_area(self) -> QSplitter:
         """创建主要工作区域"""
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # 左侧：提示词编辑区
         left_panel = self.create_prompt_panel()
@@ -458,20 +580,24 @@ class MainWindow(QMainWindow):
         right_panel = self.create_review_panel()
         splitter.addWidget(right_panel)
         
-        # 设置分割比例
+        # 设置分割比例和拉伸因子
         splitter.setSizes([400, 800])
+        splitter.setStretchFactor(0, 1)  # 左侧可以拉伸
+        splitter.setStretchFactor(1, 2)  # 右侧优先拉伸，比例为2
         
         return splitter
     
     def create_prompt_panel(self) -> QGroupBox:
         """创建提示词编辑面板"""
         group = QGroupBox("提示词模板")
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(group)
         
         # 系统提示词
         layout.addWidget(QLabel("系统提示词:"))
         self.system_prompt_edit = QPlainTextEdit()
-        self.system_prompt_edit.setMaximumHeight(100)
+        self.system_prompt_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # 移除固定高度限制，让它可以自由扩展
         self.system_prompt_edit.setPlainText(
             "你是一个专业的图像分析师，请仔细观察图像并生成准确的英文描述。"
         )
@@ -480,6 +606,7 @@ class MainWindow(QMainWindow):
         # 用户提示词
         layout.addWidget(QLabel("用户提示词模板:"))
         self.user_prompt_edit = QPlainTextEdit()
+        self.user_prompt_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.user_prompt_edit.setPlainText(
             "请为这张图片生成一个详细的英文提示词，描述图片中的内容、风格、构图等要素。"
         )
@@ -489,10 +616,12 @@ class MainWindow(QMainWindow):
     
     def create_review_panel(self) -> QSplitter:
         """创建图片审阅面板"""
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # 左侧：图片列表
         left_group = QGroupBox("图片列表")
+        left_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left_group)
         
         # 批量操作控制
@@ -510,6 +639,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(batch_control_layout)
         
         self.image_list = QListWidget()
+        self.image_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         # 设置列表项的样式，避免黑色背景问题
         self.image_list.setStyleSheet("""
             QListWidget::item:selected {
@@ -534,23 +664,28 @@ class MainWindow(QMainWindow):
         right_panel = self.create_detail_panel()
         splitter.addWidget(right_panel)
         
-        # 设置分割比例
+        # 设置分割比例和拉伸因子
         splitter.setSizes([300, 500])
+        splitter.setStretchFactor(0, 1)  # 左侧图片列表
+        splitter.setStretchFactor(1, 2)  # 右侧详细信息优先拉伸
         
         return splitter
     
     def create_detail_panel(self) -> QWidget:
         """创建详细信息面板"""
         widget = QWidget()
+        widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(widget)
         
         # 图片预览区
         preview_group = QGroupBox("图片预览")
+        preview_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         preview_layout = QVBoxLayout(preview_group)
         
         # 文件名显示标签
         self.current_filename_label = QLabel("未选择文件")
-        self.current_filename_label.setAlignment(Qt.AlignCenter)
+        self.current_filename_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.current_filename_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.current_filename_label.setStyleSheet("""
             QLabel {
                 background-color: #f0f0f0;
@@ -562,63 +697,69 @@ class MainWindow(QMainWindow):
         """)
         preview_layout.addWidget(self.current_filename_label)
         
-        # 图片预览
-        self.image_preview = QLabel("选择图片查看预览")
-        self.image_preview.setMinimumHeight(200)
-        self.image_preview.setAlignment(Qt.AlignCenter)
-        self.image_preview.setStyleSheet("border: 1px solid gray;")
-        preview_layout.addWidget(self.image_preview)
+        # 图片预览 - 使用自适应标签
+        self.image_preview = AdaptiveImageLabel()
+        self.image_preview.setText("选择图片查看预览")
+        preview_layout.addWidget(self.image_preview, 1)  # 设置stretch factor为1
         
-        layout.addWidget(preview_group)
+        layout.addWidget(preview_group, 1)  # 图片预览区占据更多空间
         
         # 提示词对比区域
         prompt_group = QGroupBox("提示词")
+        prompt_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         prompt_layout = QVBoxLayout(prompt_group)
         
         # 当前提示词（可编辑）
         current_label = QLabel("当前提示词:")
-        current_label.setFont(QFont("Arial", 9, QFont.Bold))
+        current_label.setFont(QFont("Arial", 9, QFont.Weight.Bold))
         prompt_layout.addWidget(current_label)
         
         self.current_prompt_edit = QTextEdit()
-        self.current_prompt_edit.setMaximumHeight(100)
+        self.current_prompt_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # 移除固定高度限制
         self.current_prompt_edit.setReadOnly(False)  # 改为可编辑
         self.current_prompt_edit.setStyleSheet("background-color: #ffffff; border: 1px solid #aaa;")  # 改为可编辑样式
         prompt_layout.addWidget(self.current_prompt_edit)
         
         # 新生成的提示词（可编辑）
         new_label = QLabel("新生成的提示词:")
-        new_label.setFont(QFont("Arial", 9, QFont.Bold))
+        new_label.setFont(QFont("Arial", 9, QFont.Weight.Bold))
         prompt_layout.addWidget(new_label)
         
         self.generated_prompt_edit = QTextEdit()
-        self.generated_prompt_edit.setMaximumHeight(100)
+        self.generated_prompt_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # 移除固定高度限制
         prompt_layout.addWidget(self.generated_prompt_edit)
         
-        layout.addWidget(prompt_group)
+        layout.addWidget(prompt_group, 1)  # 提示词区域也占据一定空间
         
         # 操作按钮
         button_layout = QHBoxLayout()
         
         self.regenerate_btn = QPushButton("重新生成")
+        self.regenerate_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         button_layout.addWidget(self.regenerate_btn)
         
-        self.save_current_btn = QPushButton("保存当前")
-        self.save_current_btn.setStyleSheet("background-color: #2196F3; color: white;")
+        self.save_current_btn = QPushButton("确认修改")
+        self.save_current_btn.setStyleSheet("background-color: #FF9800; color: white;")
+        self.save_current_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.save_current_btn.setToolTip("确认当前修改并更新列表显示")
         button_layout.addWidget(self.save_current_btn)
         
         self.approve_btn = QPushButton("通过")
         self.approve_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+        self.approve_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         button_layout.addWidget(self.approve_btn)
         
         self.reject_btn = QPushButton("拒绝")
         self.reject_btn.setStyleSheet("background-color: #f44336; color: white;")
+        self.reject_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         button_layout.addWidget(self.reject_btn)
         
         layout.addLayout(button_layout)
         
         return widget
-    
+
     def setup_connections(self):
         """设置信号连接"""
         # 文件夹和Manifest相关
@@ -631,6 +772,7 @@ class MainWindow(QMainWindow):
         self.save_config_btn.clicked.connect(self.save_config)
         self.execute_btn.clicked.connect(self.start_batch_processing)
         self.pause_btn.clicked.connect(self.stop_batch_processing)
+        self.save_all_btn.clicked.connect(self.save_all_to_csv)
         self.export_txt_btn.clicked.connect(self.export_txt_files)
         
         # 图片审阅相关
@@ -640,9 +782,77 @@ class MainWindow(QMainWindow):
         self.reject_btn.clicked.connect(self.reject_current_image)
         self.regenerate_btn.clicked.connect(self.regenerate_current_image)
         
+        # 自动保存 - 当提示词文本改变时自动保存到内存
+        self.current_prompt_edit.textChanged.connect(self.on_prompt_text_changed)
+        
         # 批量操作相关
         self.select_all_checkbox.stateChanged.connect(self.on_select_all_changed)
         self.batch_regenerate_btn.clicked.connect(self.start_batch_regenerate)
+        
+        # 键盘快捷键
+        self.setup_keyboard_shortcuts()
+    
+    def setup_keyboard_shortcuts(self):
+        """设置键盘快捷键"""
+        from PySide6.QtGui import QShortcut, QKeySequence
+        from PySide6.QtCore import Qt
+        
+        # 左右键切换图片
+        self.left_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
+        self.left_shortcut.activated.connect(self.previous_image)
+        
+        self.right_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        self.right_shortcut.activated.connect(self.next_image)
+        
+        print("✅ 键盘快捷键已设置: 左键←上一张，右键→下一张")
+    
+    def previous_image(self):
+        """切换到上一张图片"""
+        if not self.manifest_manager or self.image_list.count() == 0:
+            return
+        
+        current_item = self.image_list.currentItem()
+        if not current_item:
+            # 如果没有选中项，选择第一张
+            if self.image_list.count() > 0:
+                self.image_list.setCurrentItem(self.image_list.item(0))
+            return
+        
+        current_row = self.image_list.row(current_item)
+        if current_row > 0:
+            # 切换到上一张
+            prev_item = self.image_list.item(current_row - 1)
+            self.image_list.setCurrentItem(prev_item)
+            self.status_bar.showMessage(f"← 上一张: {prev_item.data(Qt.ItemDataRole.UserRole).filepath}")
+        else:
+            # 已经是第一张，循环到最后一张
+            last_item = self.image_list.item(self.image_list.count() - 1)
+            self.image_list.setCurrentItem(last_item)
+            self.status_bar.showMessage(f"← 循环到最后一张: {last_item.data(Qt.ItemDataRole.UserRole).filepath}")
+    
+    def next_image(self):
+        """切换到下一张图片"""
+        if not self.manifest_manager or self.image_list.count() == 0:
+            return
+        
+        current_item = self.image_list.currentItem()
+        if not current_item:
+            # 如果没有选中项，选择第一张
+            if self.image_list.count() > 0:
+                self.image_list.setCurrentItem(self.image_list.item(0))
+            return
+        
+        current_row = self.image_list.row(current_item)
+        if current_row < self.image_list.count() - 1:
+            # 切换到下一张
+            next_item = self.image_list.item(current_row + 1)
+            self.image_list.setCurrentItem(next_item)
+            self.status_bar.showMessage(f"→ 下一张: {next_item.data(Qt.ItemDataRole.UserRole).filepath}")
+        else:
+            # 已经是最后一张，循环到第一张
+            first_item = self.image_list.item(0)
+            self.image_list.setCurrentItem(first_item)
+            self.status_bar.showMessage(f"→ 循环到第一张: {first_item.data(Qt.ItemDataRole.UserRole).filepath}")
     
     def browse_manifest_file(self):
         """浏览选择 manifest 文件"""
@@ -698,7 +908,7 @@ class MainWindow(QMainWindow):
             
             # 创建列表项
             item = QListWidgetItem()
-            item.setData(Qt.UserRole, record)
+            item.setData(Qt.ItemDataRole.UserRole, record)
             item.setSizeHint(item_widget.sizeHint())
             
             self.image_list.addItem(item)
@@ -711,7 +921,7 @@ class MainWindow(QMainWindow):
             self.current_filename_label.setText("未选择文件")
             return
         
-        record = current_item.data(Qt.UserRole)
+        record = current_item.data(Qt.ItemDataRole.UserRole)
         if record:
             # 更新当前记录
             self.current_record = record
@@ -747,6 +957,17 @@ class MainWindow(QMainWindow):
         if current_item:
             self.image_list.setCurrentItem(current_item)
     
+    def _restore_current_selection(self, filepath: str):
+        """根据文件路径恢复列表选中状态"""
+        for i in range(self.image_list.count()):
+            item = self.image_list.item(i)
+            record = item.data(Qt.ItemDataRole.UserRole)
+            if record and record.filepath == filepath:
+                self.image_list.setCurrentItem(item)
+                # 手动触发选择事件，确保UI状态正确更新
+                self.on_image_selected(item, None)
+                break
+    
     def load_image_preview(self, filepath: str):
         """加载并显示图片预览"""
         try:
@@ -768,30 +989,14 @@ class MainWindow(QMainWindow):
             
             # 加载图片
             from PySide6.QtGui import QPixmap
-            from PySide6.QtCore import Qt
             pixmap = QPixmap(str(full_path))
             
             if pixmap.isNull():
                 self.image_preview.setText(f"无法加载图片: {filepath}")
                 return
             
-            # 缩放图片以适应预览区域
-            preview_size = self.image_preview.size()
-            if preview_size.width() > 50 and preview_size.height() > 50:  # 确保有合理的尺寸
-                scaled_pixmap = pixmap.scaled(
-                    preview_size, 
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.image_preview.setPixmap(scaled_pixmap)
-            else:
-                # 如果预览区域太小，使用默认尺寸
-                scaled_pixmap = pixmap.scaled(
-                    300, 200,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.image_preview.setPixmap(scaled_pixmap)
+            # 使用AdaptiveImageLabel的set_pixmap方法，它会自动处理缩放
+            self.image_preview.set_pixmap(pixmap)
                 
         except Exception as e:
             self.image_preview.setText(f"加载图片失败: {filepath}\n错误: {str(e)}")
@@ -799,6 +1004,10 @@ class MainWindow(QMainWindow):
     def load_config_to_ui(self):
         """从配置加载到UI"""
         try:
+            # 先从配置文件加载设置
+            settings.load_from_file()
+            
+            # 然后将设置加载到UI
             if settings.api_key:
                 self.api_key_edit.setText(settings.api_key)
             if settings.group_id:
@@ -910,10 +1119,10 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "确认", 
             f"将逐张处理 {pending_count} 张待处理的图片，是否继续？",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         
         try:
@@ -933,7 +1142,7 @@ class MainWindow(QMainWindow):
                 return
             
             # 启动后台处理线程
-            self.processing_thread = BatchProcessingThread(
+            self.batch_thread = BatchProcessingThread(
                 manifest_manager=self.manifest_manager,
                 image_folder=image_folder,
                 prompt_template=self.user_prompt_edit.toPlainText(),
@@ -941,10 +1150,10 @@ class MainWindow(QMainWindow):
             )
             
             # 连接信号
-            self.processing_thread.progress_updated.connect(self.on_progress_updated)
-            self.processing_thread.image_processed.connect(self.on_image_processed)
-            self.processing_thread.processing_finished.connect(self.on_processing_finished)
-            self.processing_thread.error_occurred.connect(self.on_error_occurred)
+            self.batch_thread.progress_updated.connect(self.on_progress_updated)
+            self.batch_thread.image_processed.connect(self.on_image_processed)
+            self.batch_thread.processing_finished.connect(self.on_processing_finished)
+            self.batch_thread.error_occurred.connect(self.on_error_occurred)
             
             # 更新UI状态
             self.execute_btn.setEnabled(False)
@@ -954,7 +1163,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.setMaximum(pending_count)
             
             # 启动线程
-            self.processing_thread.start()
+            self.batch_thread.start()
             self.status_bar.showMessage("正在逐张处理图片...")
             
         except Exception as e:
@@ -962,9 +1171,9 @@ class MainWindow(QMainWindow):
     
     def stop_batch_processing(self):
         """停止批量处理"""
-        if self.processing_thread and self.processing_thread.isRunning():
-            self.processing_thread.stop_processing()
-            self.processing_thread.wait(3000)  # 等待最多3秒
+        if self.batch_thread and self.batch_thread.isRunning():
+            self.batch_thread.stop_processing()
+            self.batch_thread.wait(3000)  # 等待最多3秒
             self.status_bar.showMessage("正在停止处理...")
     
     def on_progress_updated(self, current: int, total: int, current_image: str):
@@ -1024,9 +1233,9 @@ class MainWindow(QMainWindow):
         self.regenerate_btn.setEnabled(True)
         
         # 清理线程引用
-        if self.regen_thread:
-            self.regen_thread.deleteLater()
-            self.regen_thread = None
+        if self.single_regen_thread:
+            self.single_regen_thread.deleteLater()
+            self.single_regen_thread = None
 
         # 将绝对路径转为 manifest 中的相对路径
         base = self.current_manifest_path.parent if self.current_manifest_path \
@@ -1053,6 +1262,9 @@ class MainWindow(QMainWindow):
                         # 启用通过/拒绝按钮
                         self.approve_btn.setEnabled(True)
                         self.reject_btn.setEnabled(True)
+                        
+                        # 确保图片在列表中保持选中状态
+                        self._restore_current_selection(rel_path)
                     else:
                         # 失败时清理临时属性
                         if hasattr(rec, 'temp_new_prompt'):
@@ -1085,9 +1297,9 @@ class MainWindow(QMainWindow):
         self.regenerate_btn.setEnabled(True)
         
         # 清理线程引用
-        if self.regen_thread:
-            self.regen_thread.deleteLater()
-            self.regen_thread = None
+        if self.single_regen_thread:
+            self.single_regen_thread.deleteLater()
+            self.single_regen_thread = None
         
         # 显示错误
         self.status_bar.showMessage("重新生成失败")
@@ -1108,7 +1320,7 @@ class MainWindow(QMainWindow):
         record = self.current_record
 
         # 检查是否正在处理
-        if self.regen_thread and self.regen_thread.isRunning():
+        if self.single_regen_thread and self.single_regen_thread.isRunning():
             QMessageBox.warning(self, "警告", "正在处理中，请稍候...")
             return
 
@@ -1140,11 +1352,11 @@ class MainWindow(QMainWindow):
             f"文件: {record.filepath}\n"
             f"当前重试次数: {record.retry_cnt}\n\n"
             f"重新生成将会覆盖现有的提示词。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
         
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         # 启动重新生成
@@ -1160,19 +1372,19 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"正在重新生成: {image_path.name}")
 
             # 创建并启动线程
-            self.regen_thread = SingleImageProcessingThread(
+            self.single_regen_thread = SingleImageProcessingThread(
                 image_path      = image_path,
                 prompt_template = user_prompt,
                 system_prompt   = self.system_prompt_edit.toPlainText().strip()
             )
             
             # 连接信号
-            self.regen_thread.finished.connect(self.on_image_regenerated)
-            self.regen_thread.error.connect(self.on_regeneration_error)
-            self.regen_thread.progress.connect(self.on_regeneration_progress)
+            self.single_regen_thread.finished.connect(self.on_image_regenerated)
+            self.single_regen_thread.error.connect(self.on_regeneration_error)
+            self.single_regen_thread.progress.connect(self.on_regeneration_progress)
             
             # 启动线程
-            self.regen_thread.start()
+            self.single_regen_thread.start()
             
         except Exception as e:
             # 隐藏进度条并重新启用按钮
@@ -1184,12 +1396,12 @@ class MainWindow(QMainWindow):
     
     def _cleanup_regen_thread(self):
         """清理重新生成线程"""
-        if self.regen_thread:
-            if self.regen_thread.isRunning():
-                self.regen_thread.stop_processing()
-                self.regen_thread.wait(3000)  # 等待最多3秒
-            self.regen_thread.deleteLater()
-            self.regen_thread = None
+        if self.single_regen_thread:
+            if self.single_regen_thread.isRunning():
+                self.single_regen_thread.stop_processing()
+                self.single_regen_thread.wait(3000)  # 等待最多3秒
+            self.single_regen_thread.deleteLater()
+            self.single_regen_thread = None
     
     def export_txt_files(self):
         """导出 TXT 文件 - 直接根据CSV表格生成，不需要确认"""
@@ -1221,38 +1433,78 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"导出TXT文件时出错:\n{e}")
     
+    def save_all_to_csv(self):
+        """手动刷新保存所有数据到CSV文件"""
+        if not self.manifest_manager:
+            QMessageBox.warning(self, "警告", "请先加载 manifest 文件")
+            return
+        
+        try:
+            self.manifest_manager.save_to_csv()
+            self.status_bar.showMessage("✅ 数据已刷新保存到CSV文件")
+            QMessageBox.information(self, "刷新保存成功", "所有数据已刷新保存到CSV文件！")
+            print(f"✅ [SUCCESS] 数据已刷新保存到CSV")
+        except Exception as e:
+            QMessageBox.critical(self, "刷新保存失败", f"刷新保存到CSV文件时出错:\n{e}")
+            print(f"❌ [ERROR] 刷新保存CSV失败: {e}")
+    
+    def on_prompt_text_changed(self):
+        """当提示词文本改变时的实时自动保存处理"""
+        if not self.current_record or not self.manifest_manager:
+            return
+        
+        # 获取当前编辑框内容
+        current_text = self.current_prompt_edit.toPlainText().strip()
+        
+        # 实时保存到CSV文件
+        if current_text != self.current_record.prompt_en:
+            print(f"🔧 [AUTO-SAVE] 实时保存提示词: {self.current_record.filepath}")
+            self.current_record.prompt_en = current_text
+            if current_text:  # 如果有内容，标记为已确认
+                self.current_record.status = ProcessStatus.APPROVED
+            
+            # 立即保存到CSV文件
+            try:
+                self.manifest_manager.save_to_csv()
+                self.status_bar.showMessage(f"✅ 已自动保存: {self.current_record.filepath}")
+            except Exception as e:
+                print(f"❌ [ERROR] 自动保存失败: {e}")
+                self.status_bar.showMessage(f"❌ 自动保存失败: {e}")
+    
     def save_current_prompt(self):
-        """保存当前提示词的修改"""
+        """确认当前修改并更新列表显示"""
         if not self.current_record:
             QMessageBox.warning(self, "警告", "请先选择一张图片")
             return
             
         record = self.current_record
+        print(f"🔧 [DEBUG] 确认修改: {record.filepath}")
             
         try:
             # 获取当前提示词编辑框的内容
             current_prompt_text = self.current_prompt_edit.toPlainText().strip()
             
-            if not current_prompt_text:
-                QMessageBox.warning(self, "警告", "当前提示词不能为空")
-                return
-            
-            # 保存完整的提示词到记录中（包含中英文）
+            # 更新记录状态（实际上自动保存已经处理了数据保存）
             record.prompt_en = current_prompt_text
-            record.status = ProcessStatus.APPROVED
+            if current_prompt_text:
+                record.status = ProcessStatus.APPROVED
             
-            # 不立即创建TXT文件，等待用户统一导出
-            
-            # 保存更改到manifest
+            # 更新列表显示，让用户看到最新状态
             if self.manifest_manager:
-                self.manifest_manager.save_to_csv()
+                # 保存当前选中的记录引用，避免更新列表后丢失选中状态
+                current_record_filepath = record.filepath
                 self.update_image_list()
+                # 重新选中当前记录
+                self._restore_current_selection(current_record_filepath)
                 
-            self.status_bar.showMessage(f"✅ 已保存当前提示词: {record.filepath}")
-            QMessageBox.information(self, "成功", "当前提示词已保存！")
-            
+                self.status_bar.showMessage(f"✅ 已确认修改: {record.filepath}")
+                print(f"✅ [SUCCESS] 确认修改完成: {record.filepath}")
+            else:
+                QMessageBox.critical(self, "错误", "Manifest管理器未初始化!")
+                
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存当前提示词时出错:\n{e}")
+            print(f"❌ [ERROR] 确认修改失败: {e}")
+            QMessageBox.critical(self, "错误", f"确认修改时出错:\n{e}")
     
     def approve_current_image(self):
         """通过当前图片 - 使用编辑框中的提示词"""
@@ -1261,6 +1513,7 @@ class MainWindow(QMainWindow):
             return
             
         record = self.current_record
+        current_filepath = record.filepath  # 保存当前文件路径用于恢复选中
             
         # 获取用户编辑后的提示词内容
         current_prompt_text = self.current_prompt_edit.toPlainText().strip()
@@ -1282,12 +1535,15 @@ class MainWindow(QMainWindow):
             # 不立即创建TXT文件，等待用户统一导出
             
             # 清理临时属性
-            delattr(record, 'temp_new_prompt')
+            if hasattr(record, 'temp_new_prompt'):
+                delattr(record, 'temp_new_prompt')
             
-            # 保存更改
+            # 保存更改并恢复选中状态
             if self.manifest_manager:
                 self.manifest_manager.save_to_csv()
                 self.update_image_list()
+                # 自动恢复到当前图片的选中状态
+                self._restore_current_selection(current_filepath)
                 
             # 更新UI显示
             self.current_prompt_edit.setPlainText(record.prompt_en)
@@ -1298,7 +1554,7 @@ class MainWindow(QMainWindow):
             self.reject_btn.setEnabled(False)
             
             self.status_bar.showMessage(f"✅ 已通过新提示词: {record.filepath}")
-            QMessageBox.information(self, "成功", "新提示词已通过并保存！")
+            print(f"✅ [SUCCESS] 通过提示词并恢复选中状态: {current_filepath}")
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"通过提示词时出错:\n{e}")
@@ -1310,6 +1566,7 @@ class MainWindow(QMainWindow):
             return
             
         record = self.current_record
+        current_filepath = record.filepath  # 保存当前文件路径用于恢复选中
             
         try:
             # 获取当前提示词编辑框的内容
@@ -1321,12 +1578,12 @@ class MainWindow(QMainWindow):
                 record.prompt_en = current_prompt_text
                 record.status = ProcessStatus.APPROVED  # 标记为已确认
                 
-                # 不立即创建TXT文件，等待用户统一导出
-                
-                # 保存更改到manifest
+                # 保存更改并恢复选中状态
                 if self.manifest_manager:
                     self.manifest_manager.save_to_csv()
                     self.update_image_list()
+                    # 自动恢复到当前图片的选中状态
+                    self._restore_current_selection(current_filepath)
             
             # 清理临时属性（拒绝新提示词）
             if hasattr(record, 'temp_new_prompt'):
@@ -1341,7 +1598,7 @@ class MainWindow(QMainWindow):
             self.reject_btn.setEnabled(False)
             
             self.status_bar.showMessage(f"❌ 已拒绝新提示词: {record.filepath}")
-            QMessageBox.information(self, "拒绝", "新提示词已拒绝，当前提示词的修改已保存。")
+            print(f"✅ [SUCCESS] 拒绝提示词并恢复选中状态: {current_filepath}")
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"拒绝提示词时出错:\n{e}")
@@ -1351,10 +1608,10 @@ class MainWindow(QMainWindow):
         # 检查是否有正在运行的线程
         threads_running = []
         
-        if self.processing_thread and self.processing_thread.isRunning():
+        if self.batch_thread and self.batch_thread.isRunning():
             threads_running.append("批量处理")
         
-        if self.regen_thread and self.regen_thread.isRunning():
+        if self.single_regen_thread and self.single_regen_thread.isRunning():
             threads_running.append("重新生成")
         
         if threads_running:
@@ -1362,11 +1619,11 @@ class MainWindow(QMainWindow):
                 self, "确认退出", 
                 f"以下任务正在运行:\n• {chr(10).join(threads_running)}\n\n"
                 f"确定要退出程序吗？\n(正在运行的任务将被强制停止)",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
             )
             
-            if reply != QMessageBox.Yes:
+            if reply != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
         
@@ -1385,12 +1642,12 @@ class MainWindow(QMainWindow):
     def _cleanup_all_threads(self):
         """清理所有线程"""
         # 清理批量处理线程
-        if self.processing_thread:
-            if self.processing_thread.isRunning():
-                self.processing_thread.stop_processing()
-                self.processing_thread.wait(3000)
-            self.processing_thread.deleteLater()
-            self.processing_thread = None
+        if self.batch_thread:
+            if self.batch_thread.isRunning():
+                self.batch_thread.stop_processing()
+                self.batch_thread.wait(3000)
+            self.batch_thread.deleteLater()
+            self.batch_thread = None
         
         # 清理重新生成线程
         self._cleanup_regen_thread()
@@ -1437,11 +1694,13 @@ class MainWindow(QMainWindow):
                 # 更直接的方法：获取布局中的第一个复选框
                 layout = widget.layout()
                 if layout and layout.count() > 0:
-                    checkbox_widget = layout.itemAt(0).widget()
-                    if isinstance(checkbox_widget, QCheckBox):
-                        checkbox_widget.blockSignals(True)
-                        checkbox_widget.setChecked(target_checked)
-                        checkbox_widget.blockSignals(False)
+                    item = layout.itemAt(0)
+                    if item:
+                        checkbox_widget = item.widget()
+                        if isinstance(checkbox_widget, QCheckBox):
+                            checkbox_widget.blockSignals(True)
+                            checkbox_widget.setChecked(target_checked)
+                            checkbox_widget.blockSignals(False)
         
         # 更新全选复选框的状态
         self.select_all_checkbox.blockSignals(True)
@@ -1489,9 +1748,11 @@ class MainWindow(QMainWindow):
                 # 更直接的方法：获取布局中的第一个复选框
                 layout = widget.layout()
                 if layout and layout.count() > 0:
-                    checkbox_widget = layout.itemAt(0).widget()
-                    if isinstance(checkbox_widget, QCheckBox) and checkbox_widget.isChecked():
-                        count += 1
+                    item = layout.itemAt(0)
+                    if item:
+                        checkbox_widget = item.widget()
+                        if isinstance(checkbox_widget, QCheckBox) and checkbox_widget.isChecked():
+                            count += 1
         return count
     
     def get_selected_records(self):
@@ -1504,11 +1765,13 @@ class MainWindow(QMainWindow):
                 # 更直接的方法：获取布局中的第一个复选框
                 layout = widget.layout()
                 if layout and layout.count() > 0:
-                    checkbox_widget = layout.itemAt(0).widget()
-                    if isinstance(checkbox_widget, QCheckBox) and checkbox_widget.isChecked():
-                        record = checkbox_widget.property("record")
-                        if record:
-                            selected_records.append(record)
+                    item = layout.itemAt(0)
+                    if item:
+                        checkbox_widget = item.widget()
+                        if isinstance(checkbox_widget, QCheckBox) and checkbox_widget.isChecked():
+                            record = checkbox_widget.property("record")
+                            if record:
+                                selected_records.append(record)
         return selected_records
     
     def start_batch_regenerate(self):
@@ -1521,8 +1784,8 @@ class MainWindow(QMainWindow):
         
         # 检查是否正在处理
         if (self.batch_regen_thread and self.batch_regen_thread.isRunning()) or \
-           (self.regen_thread and self.regen_thread.isRunning()) or \
-           (self.processing_thread and self.processing_thread.isRunning()):
+           (self.single_regen_thread and self.single_regen_thread.isRunning()) or \
+           (self.batch_thread and self.batch_thread.isRunning()):
             QMessageBox.warning(self, "警告", "有其他任务正在处理中，请稍候...")
             return
         
@@ -1557,11 +1820,11 @@ class MainWindow(QMainWindow):
             f"确定要重新生成以下 {len(selected_records)} 张图片的提示词吗？\n\n"
             f"这将为每张图片生成新的提示词用于对比。\n"
             f"您可以逐个选择通过或拒绝。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
         
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         
         # 启动批量重新生成

@@ -113,13 +113,24 @@ class Settings:
                 self.api_base_url = api_config.get("base_url", self.api_base_url)
                 self.model_name = api_config.get("model_name", self.model_name)  # 加载模型名称
                 
-                # 检查配置文件中的API Key是否来自OpenRouter
-                if self.api_key and "openrouter" in self.api_base_url.lower():
-                    self.use_openrouter = True
-                    self.openrouter_api_key = self.api_key
-                    print("🔧 检测到OpenRouter配置")
-                elif self.api_key and not self.use_openrouter:
-                    print("🔧 检测到MiniMax直接API配置")
+                # 自动检测和修正API配置
+                if self.api_key:
+                    if self.api_key.startswith("sk-or-") or "openrouter" in self.api_base_url.lower():
+                        # OpenRouter API密钥或OpenRouter URL
+                        self.use_openrouter = True
+                        self.openrouter_api_key = self.api_key
+                        # 自动修正为OpenRouter配置
+                        self.api_base_url = "https://openrouter.ai/api/v1/chat/completions"
+                        if self.model_name == "MiniMax-VL-01":
+                            self.model_name = "minimax/minimax-01"
+                        print("🔧 检测到OpenRouter配置，已自动修正设置")
+                    else:
+                        # MiniMax直接API
+                        self.use_openrouter = False
+                        self.api_base_url = "https://api.minimax.chat/v1/chat/completions"
+                        if self.model_name == "minimax/minimax-01":
+                            self.model_name = "MiniMax-VL-01"
+                        print("🔧 检测到MiniMax直接API配置")
             
             # 加载处理配置
             if "processing" in config_data:

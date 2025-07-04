@@ -23,6 +23,8 @@ class ImageRecord:
     prompt_cn: str = ""
     status: ProcessStatus = ProcessStatus.PENDING
     retry_cnt: int = 0
+    # 临时属性，用于GUI中存储新生成的提示词
+    temp_new_prompt: str = ""
     
     def to_dict(self) -> Dict[str, str]:
         """转换为字典格式"""
