@@ -1,0 +1,3 @@
+filepath,prompt_en,prompt_cn,status,retry_cnt
+test_shapes.png,"API 响应格式不认识: {'error': {'message': 'Internal Server Error', 'code': 500}, 'user_id': 'user_2zMOg5DseWNxy3wNiYBUW9aOWUj'}",,approved,0
+test_image.jpg,"API 响应格式不认识: {'error': {'message': 'Internal Server Error', 'code': 500}, 'user_id': 'user_2zMOg5DseWNxy3wNiYBUW9aOWUj'}",,approved,0

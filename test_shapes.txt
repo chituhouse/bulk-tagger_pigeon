@@ -1,0 +1,3 @@
+The first image features a simple graphic layout with two shapes. On the left, there is a large red circle labeled "TEST" at the top and "MiniMax" below it. To the right of the circle, there is a blue square. The background is plain white, which emphasizes the colors of the shapes.
+
+The second image has a light blue background. It contains two shapes: a red rectangle positioned at the top left and a green oval located towards the bottom right. In the center of the image, there is text that reads "Test Image for MiniMax Tagger" in a bold, black font. The overall design is minimalistic, focusing on the shapes and the text.
