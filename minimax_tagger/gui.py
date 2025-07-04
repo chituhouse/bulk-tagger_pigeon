@@ -160,6 +160,68 @@ class BatchProcessingThread(QThread):
             print(f"❌ 创建TXT文件失败 {image_path}: {e}")
 
 
+############################################
+# 1. 新增 —— 单张图片处理后台线程
+############################################
+class SingleImageProcessingThread(QThread):
+    finished = Signal(str, str, bool)   # img_path, prompt, success
+    error   = Signal(str)
+    progress = Signal(str)              # 进度信息
+
+    def __init__(self, image_path: Path, prompt_template: str, system_prompt: str | None):
+        super().__init__()
+        self.image_path       = image_path
+        self.prompt_template  = prompt_template
+        self.system_prompt    = system_prompt
+        self._should_stop     = False
+
+    def stop_processing(self):
+        """停止处理"""
+        self._should_stop = True
+
+    def run(self):
+        try:
+            if self._should_stop:
+                return
+                
+            self.progress.emit("正在初始化...")
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            if self._should_stop:
+                return
+                
+            self.progress.emit("正在调用API...")
+            
+            from .pipeline import process_image_batch
+            results = loop.run_until_complete(
+                process_image_batch(
+                    image_paths     = [self.image_path],
+                    prompt_template = self.prompt_template,
+                    system_prompt   = self.system_prompt
+                )
+            )
+            
+            if self._should_stop:
+                return
+                
+            if results:
+                _, prompt, success = results[0]
+                self.finished.emit(str(self.image_path), prompt, success)
+            else:
+                self.finished.emit(str(self.image_path), "API 返回空结果", False)
+
+        except Exception as e:
+            if not self._should_stop:
+                self.error.emit(f"单张处理失败: {e}")
+        finally:
+            try: 
+                loop.close()
+            except Exception: 
+                pass
+
+
 class MainWindow(QMainWindow):
     """主窗口类"""
     
@@ -168,6 +230,7 @@ class MainWindow(QMainWindow):
         self.manifest_manager: Optional[ManifestManager] = None
         self.current_manifest_path: Optional[Path] = None
         self.processing_thread: Optional[BatchProcessingThread] = None
+        self.regen_thread: SingleImageProcessingThread | None = None   # 新增
         
         # 尝试加载配置文件
         settings.load_from_file()
@@ -730,8 +793,96 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_bar.showMessage("处理失败")
     
+    ############################################
+    # 2. 槽函数 —— 线程回调
+    ############################################
+    def on_image_regenerated(self, img_path: str, prompt: str, success: bool):
+        """重新生成完成回调"""
+        # 重新启用按钮
+        self.regenerate_btn.setEnabled(True)
+        
+        # 清理线程引用
+        if self.regen_thread:
+            self.regen_thread.deleteLater()
+            self.regen_thread = None
+
+        # 将绝对路径转为 manifest 中的相对路径
+        base = self.current_manifest_path.parent if self.current_manifest_path \
+               else Path(self.folder_path_edit.text().strip())
+        try:
+            rel_path = str(Path(img_path).relative_to(base))
+        except Exception:
+            rel_path = Path(img_path).name
+
+        # 更新记录
+        if self.manifest_manager:
+            updated = False
+            for rec in self.manifest_manager.records:
+                if rec.filepath == rel_path:
+                    rec.prompt_en = prompt
+                    rec.retry_cnt += 1
+                    if success:
+                        rec.status = ProcessStatus.PENDING   # 重新进入待审状态
+                        # 自动创建TXT文件
+                        self._create_txt_file_for_record(rec, base)
+                    updated = True
+                    break
+            
+            if updated:
+                self.manifest_manager.save_to_csv()
+                self.update_image_list()
+            else:
+                QMessageBox.warning(self, "警告", f"未找到对应的记录: {rel_path}")
+
+        # 更新UI显示
+        self.generated_prompt_edit.setPlainText(prompt)
+        
+        # 显示结果
+        if success:
+            self.status_bar.showMessage(f"重新生成成功: {Path(img_path).name}")
+            QMessageBox.information(self, "成功", f"重新生成成功！\n\n文件: {Path(img_path).name}\n提示词长度: {len(prompt)} 字符")
+        else:
+            self.status_bar.showMessage("重新生成失败")
+            QMessageBox.warning(self, "重新生成失败", f"处理失败:\n{prompt}")
+    
+    def on_regeneration_progress(self, message: str):
+        """重新生成进度更新"""
+        self.status_bar.showMessage(message)
+    
+    def on_regeneration_error(self, error_message: str):
+        """重新生成错误处理"""
+        # 重新启用按钮
+        self.regenerate_btn.setEnabled(True)
+        
+        # 清理线程引用
+        if self.regen_thread:
+            self.regen_thread.deleteLater()
+            self.regen_thread = None
+        
+        # 显示错误
+        self.status_bar.showMessage("重新生成失败")
+        QMessageBox.critical(self, "重新生成错误", error_message)
+    
+    def _create_txt_file_for_record(self, record: 'ImageRecord', base_path: Path):
+        """为记录创建TXT文件"""
+        try:
+            image_path = base_path / record.filepath
+            txt_path = image_path.with_suffix(".txt")
+            
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(record.prompt_en)
+            
+            print(f"✅ 自动创建TXT文件: {txt_path}")
+            
+        except Exception as e:
+            print(f"❌ 创建TXT文件失败 {record.filepath}: {e}")
+    
+    ############################################
+    # 3. 完善的重新生成功能
+    ############################################
     def regenerate_current_image(self):
         """重新生成当前图片的提示词"""
+        # 检查是否有选中的图片
         current_item = self.image_list.currentItem()
         if not current_item:
             QMessageBox.warning(self, "警告", "请先选择一张图片")
@@ -739,20 +890,86 @@ class MainWindow(QMainWindow):
         
         record = current_item.data(Qt.UserRole)
         if not record:
+            QMessageBox.warning(self, "警告", "无法获取图片记录")
             return
-        
-        # 检查API配置
+
+        # 检查是否正在处理
+        if self.regen_thread and self.regen_thread.isRunning():
+            QMessageBox.warning(self, "警告", "正在处理中，请稍候...")
+            return
+
+        # 验证API配置
         api_key = self.api_key_edit.text().strip()
         if not api_key:
-            QMessageBox.warning(self, "警告", "请先输入API Key")
+            QMessageBox.warning(self, "警告", "请先输入 API Key")
             return
+
+        # 验证提示词模板
+        user_prompt = self.user_prompt_edit.toPlainText().strip()
+        if not user_prompt:
+            QMessageBox.warning(self, "警告", "请先输入用户提示词模板")
+            return
+
+        # 构造完整路径
+        image_folder = self.current_manifest_path.parent if self.current_manifest_path \
+                       else Path(self.folder_path_edit.text().strip())
+        image_path = image_folder / record.filepath
         
+        if not image_path.exists():
+            QMessageBox.warning(self, "警告", f"图片文件不存在:\n{image_path}")
+            return
+
+        # 确认操作
+        reply = QMessageBox.question(
+            self, "确认重新生成", 
+            f"确定要重新生成以下图片的提示词吗？\n\n"
+            f"文件: {record.filepath}\n"
+            f"当前重试次数: {record.retry_cnt}\n\n"
+            f"重新生成将会覆盖现有的提示词。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+
+        # 启动重新生成
+        self._start_regeneration(image_path, user_prompt)
+    
+    def _start_regeneration(self, image_path: Path, user_prompt: str):
+        """启动重新生成过程"""
         try:
-            # TODO: 实现单张图片重新生成功能
-            QMessageBox.information(self, "信息", "单张重新生成功能开发中...")
+            # 禁用按钮防止重复点击
+            self.regenerate_btn.setEnabled(False)
+            self.status_bar.showMessage(f"正在重新生成: {image_path.name}")
+
+            # 创建并启动线程
+            self.regen_thread = SingleImageProcessingThread(
+                image_path      = image_path,
+                prompt_template = user_prompt,
+                system_prompt   = self.system_prompt_edit.toPlainText().strip()
+            )
+            
+            # 连接信号
+            self.regen_thread.finished.connect(self.on_image_regenerated)
+            self.regen_thread.error.connect(self.on_regeneration_error)
+            self.regen_thread.progress.connect(self.on_regeneration_progress)
+            
+            # 启动线程
+            self.regen_thread.start()
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"重新生成失败:\n{e}")
+            self.regenerate_btn.setEnabled(True)
+            QMessageBox.critical(self, "启动失败", f"无法启动重新生成过程:\n{e}")
+    
+    def _cleanup_regen_thread(self):
+        """清理重新生成线程"""
+        if self.regen_thread:
+            if self.regen_thread.isRunning():
+                self.regen_thread.stop_processing()
+                self.regen_thread.wait(3000)  # 等待最多3秒
+            self.regen_thread.deleteLater()
+            self.regen_thread = None
     
     def export_txt_files(self):
         """导出 TXT 文件"""
@@ -789,6 +1006,55 @@ class MainWindow(QMainWindow):
             if self.manifest_manager:
                 self.manifest_manager.save_to_csv()
                 self.update_image_list()
+
+    def closeEvent(self, event):
+        """窗口关闭事件处理"""
+        # 检查是否有正在运行的线程
+        threads_running = []
+        
+        if self.processing_thread and self.processing_thread.isRunning():
+            threads_running.append("批量处理")
+        
+        if self.regen_thread and self.regen_thread.isRunning():
+            threads_running.append("重新生成")
+        
+        if threads_running:
+            reply = QMessageBox.question(
+                self, "确认退出", 
+                f"以下任务正在运行:\n• {chr(10).join(threads_running)}\n\n"
+                f"确定要退出程序吗？\n(正在运行的任务将被强制停止)",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+        
+        # 停止并清理所有线程
+        self._cleanup_all_threads()
+        
+        # 保存配置
+        try:
+            self.save_config()
+        except Exception as e:
+            print(f"保存配置时出错: {e}")
+        
+        # 接受关闭事件
+        event.accept()
+    
+    def _cleanup_all_threads(self):
+        """清理所有线程"""
+        # 清理批量处理线程
+        if self.processing_thread:
+            if self.processing_thread.isRunning():
+                self.processing_thread.stop_processing()
+                self.processing_thread.wait(3000)
+            self.processing_thread.deleteLater()
+            self.processing_thread = None
+        
+        # 清理重新生成线程
+        self._cleanup_regen_thread()
 
 
 def run_gui():
