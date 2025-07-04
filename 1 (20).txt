@@ -1,11 +1,5 @@
-The image features an individual dressed in traditional East Asian attire, likely from a historical or ceremonial context. The person is standing against a plain, light gray backdrop, which provides a neutral contrast to the elaborate costume.
+中文提示词：
+这张图片展示了一位身穿传统中式服饰的人物形象。人物头戴精致的金色冠冕，上面镶嵌着一颗珍珠，冠冕设计复杂，富有古典美感。上身穿着深红色的长袍，外罩一件黑色的披肩，披肩上绣有金色的云纹图案。下身的长袍同样绣有精美的云纹图案，颜色丰富，包括金色、蓝色和红色等。整体服饰显得庄重而华丽，体现出浓厚的传统文化气息。人物站立姿势端正，双手自然下垂，整体构图简洁大方，背景为单一的灰色，突出人物的主体地位。
 
-The attire consists of multiple layers and intricate details. The outermost layer is a long, dark robe with wide sleeves and a high collar. This robe is adorned with gold embroidery featuring swirling cloud patterns, adding a regal and ornate touch to the garment. The embroidery is particularly prominent on the shoulders and the front panels of the robe.
-
-Underneath the outer robe, the individual wears a rich, maroon-colored garment that extends to the ankles. This inner layer also features elaborate embroidery, with a design that includes stylized dragons and clouds in gold, blue, and red threads. The dragons are depicted in a dynamic, flowing manner, symbolizing power and authority.
-
-The individual wears a black belt around the waist, which helps to define the silhouette and adds to the layered look of the outfit. The belt is simple in design, contrasting with the ornate embroidery of the robes.
-
-On the head, the person wears a traditional headdress. This headdress is black with gold embellishments, including a central pearl or similar ornament. The headdress has a structured, almost crown-like appearance, further emphasizing the ceremonial or high-status nature of the attire.
-
-The overall composition of the image is formal and symmetrical, with the individual standing upright and facing forward. The lighting is even and soft, highlighting the details of the costume without creating harsh shadows. The plain background ensures that the focus remains entirely on the individual and their elaborate attire, allowing the viewer to appreciate the craftsmanship and cultural significance of the clothing.
+英文提示词：
+This image depicts a person dressed in traditional Chinese attire. The individual wears an elaborate golden crown adorned with a pearl, featuring intricate designs and classical aesthetics. The upper body is clad in a deep red robe, overlaid with a black shawl embroidered with golden cloud patterns. The lower part of the robe also showcases exquisite cloud patterns in various colors, including gold, blue, and red. The overall attire appears solemn and luxurious, reflecting a rich cultural heritage. The person stands upright with hands naturally at their sides, and the composition is simple and elegant, with a plain gray background that emphasizes the subject.

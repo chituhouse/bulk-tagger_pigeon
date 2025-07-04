@@ -11,7 +11,7 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QSplitter, QTextEdit, QPlainTextEdit, QPushButton, QLabel,
         QListWidget, QListWidgetItem, QFrame, QGroupBox, QLineEdit,
-        QProgressBar, QMessageBox, QFileDialog
+        QProgressBar, QMessageBox, QFileDialog, QCheckBox
     )
     from PySide6.QtCore import Qt, QThread, QTimer, Signal
     from PySide6.QtGui import QPixmap, QFont
@@ -221,6 +221,101 @@ class SingleImageProcessingThread(QThread):
             except Exception: 
                 pass
 
+############################################
+# 2. 新增 —— 批量重新生成线程
+############################################
+class BatchRegenerateThread(QThread):
+    """批量重新生成线程"""
+    
+    progress_updated = Signal(int, int, str)  # 当前进度, 总数, 当前图片名
+    image_regenerated = Signal(str, str, bool)  # 图片路径, 生成的提示词, 是否成功
+    batch_finished = Signal(int, int)  # 成功数量, 总数量
+    error_occurred = Signal(str)  # 错误信息
+    
+    def __init__(self, image_paths: list, prompt_template: str, system_prompt: str | None = None):
+        super().__init__()
+        self.image_paths = image_paths
+        self.prompt_template = prompt_template
+        self.system_prompt = system_prompt
+        self._should_stop = False
+        
+    def stop_processing(self):
+        """停止处理"""
+        self._should_stop = True
+        
+    def run(self):
+        """批量重新生成主逻辑"""
+        try:
+            total_count = len(self.image_paths)
+            success_count = 0
+            
+            for i, image_path in enumerate(self.image_paths):
+                if self._should_stop:
+                    break
+                    
+                # 更新进度
+                self.progress_updated.emit(i + 1, total_count, image_path.name)
+                
+                try:
+                    # 处理单张图片
+                    result = self._process_single_image(image_path)
+                    
+                    if result:
+                        generated_prompt, success = result
+                        if success:
+                            success_count += 1
+                        self.image_regenerated.emit(str(image_path), generated_prompt, success)
+                    else:
+                        self.image_regenerated.emit(str(image_path), "处理失败", False)
+                        
+                except Exception as e:
+                    error_msg = f"处理图片时出错: {str(e)}"
+                    self.image_regenerated.emit(str(image_path), error_msg, False)
+                    
+            # 批量处理完成
+            self.batch_finished.emit(success_count, total_count)
+            
+        except Exception as e:
+            self.error_occurred.emit(f"批量重新生成过程中发生错误: {str(e)}")
+    
+    def _process_single_image(self, image_path: Path):
+        """处理单张图片"""
+        try:
+            # 创建新的事件循环
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                # 运行异步处理
+                result = loop.run_until_complete(self._async_process_image(image_path))
+                return result
+            finally:
+                loop.close()
+                
+        except Exception as e:
+            return f"异步处理失败: {str(e)}", False
+    
+    async def _async_process_image(self, image_path: Path):
+        """异步处理单张图片"""
+        try:
+            from .pipeline import process_image_batch
+            
+            # 调用API处理单张图片
+            results = await process_image_batch(
+                image_paths=[image_path],
+                prompt_template=self.prompt_template,
+                system_prompt=self.system_prompt
+            )
+            
+            if results and len(results) > 0:
+                _, generated_prompt, success = results[0]
+                return generated_prompt, success
+            else:
+                return "API返回空结果", False
+                
+        except Exception as e:
+            return f"API调用失败: {str(e)}", False
+
 
 class MainWindow(QMainWindow):
     """主窗口类"""
@@ -230,7 +325,8 @@ class MainWindow(QMainWindow):
         self.manifest_manager: Optional[ManifestManager] = None
         self.current_manifest_path: Optional[Path] = None
         self.processing_thread: Optional[BatchProcessingThread] = None
-        self.regen_thread: SingleImageProcessingThread | None = None   # 新增
+        self.regen_thread: SingleImageProcessingThread | None = None   # 单张重新生成线程
+        self.batch_regen_thread: BatchRegenerateThread | None = None   # 批量重新生成线程
         
         # 尝试加载配置文件
         settings.load_from_file()
@@ -404,6 +500,19 @@ class MainWindow(QMainWindow):
         left_group = QGroupBox("图片列表")
         left_layout = QVBoxLayout(left_group)
         
+        # 批量操作控制
+        batch_control_layout = QHBoxLayout()
+        
+        self.select_all_checkbox = QCheckBox("全选")
+        batch_control_layout.addWidget(self.select_all_checkbox)
+        
+        self.batch_regenerate_btn = QPushButton("批量重新生成")
+        self.batch_regenerate_btn.setEnabled(False)
+        batch_control_layout.addWidget(self.batch_regenerate_btn)
+        
+        batch_control_layout.addStretch()
+        left_layout.addLayout(batch_control_layout)
+        
         self.image_list = QListWidget()
         left_layout.addWidget(self.image_list)
         
@@ -435,12 +544,28 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(preview_group)
         
-        # 生成的提示词
-        prompt_group = QGroupBox("生成的提示词")
+        # 提示词对比区域
+        prompt_group = QGroupBox("提示词")
         prompt_layout = QVBoxLayout(prompt_group)
         
+        # 当前提示词（只读）
+        current_label = QLabel("当前提示词:")
+        current_label.setFont(QFont("Arial", 9, QFont.Bold))
+        prompt_layout.addWidget(current_label)
+        
+        self.current_prompt_edit = QTextEdit()
+        self.current_prompt_edit.setMaximumHeight(100)
+        self.current_prompt_edit.setReadOnly(True)
+        self.current_prompt_edit.setStyleSheet("background-color: #f0f0f0; border: 1px solid #ccc;")
+        prompt_layout.addWidget(self.current_prompt_edit)
+        
+        # 新生成的提示词（可编辑）
+        new_label = QLabel("新生成的提示词:")
+        new_label.setFont(QFont("Arial", 9, QFont.Bold))
+        prompt_layout.addWidget(new_label)
+        
         self.generated_prompt_edit = QTextEdit()
-        self.generated_prompt_edit.setMaximumHeight(150)
+        self.generated_prompt_edit.setMaximumHeight(100)
         prompt_layout.addWidget(self.generated_prompt_edit)
         
         layout.addWidget(prompt_group)
@@ -452,9 +577,11 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.regenerate_btn)
         
         self.approve_btn = QPushButton("通过")
+        self.approve_btn.setStyleSheet("background-color: #4CAF50; color: white;")
         button_layout.addWidget(self.approve_btn)
         
         self.reject_btn = QPushButton("拒绝")
+        self.reject_btn.setStyleSheet("background-color: #f44336; color: white;")
         button_layout.addWidget(self.reject_btn)
         
         layout.addLayout(button_layout)
@@ -480,6 +607,10 @@ class MainWindow(QMainWindow):
         self.approve_btn.clicked.connect(self.approve_current_image)
         self.reject_btn.clicked.connect(self.reject_current_image)
         self.regenerate_btn.clicked.connect(self.regenerate_current_image)
+        
+        # 批量操作相关
+        self.select_all_checkbox.stateChanged.connect(self.on_select_all_changed)
+        self.batch_regenerate_btn.clicked.connect(self.start_batch_regenerate)
     
     def browse_manifest_file(self):
         """浏览选择 manifest 文件"""
@@ -516,9 +647,30 @@ class MainWindow(QMainWindow):
         
         self.image_list.clear()
         for record in self.manifest_manager.records:
-            item = QListWidgetItem(f"{record.status.value} | {record.filepath}")
+            # 创建包含复选框的自定义widget
+            item_widget = QWidget()
+            item_layout = QHBoxLayout(item_widget)
+            item_layout.setContentsMargins(5, 2, 5, 2)
+            
+            # 复选框
+            checkbox = QCheckBox()
+            checkbox.setProperty("record", record)  # 绑定记录
+            checkbox.stateChanged.connect(self.on_item_checkbox_changed)
+            item_layout.addWidget(checkbox)
+            
+            # 状态和文件名标签
+            status_label = QLabel(f"{record.status.value} | {record.filepath}")
+            item_layout.addWidget(status_label)
+            
+            item_layout.addStretch()
+            
+            # 创建列表项
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, record)
+            item.setSizeHint(item_widget.sizeHint())
+            
             self.image_list.addItem(item)
+            self.image_list.setItemWidget(item, item_widget)
     
     def on_image_selected(self, current_item, previous_item):
         """当选择图片时的处理"""
@@ -527,8 +679,21 @@ class MainWindow(QMainWindow):
         
         record = current_item.data(Qt.UserRole)
         if record:
-            # 显示生成的提示词
-            self.generated_prompt_edit.setPlainText(record.prompt_en)
+            # 显示当前提示词（原始）
+            self.current_prompt_edit.setPlainText(record.prompt_en)
+            
+            # 如果有临时的新提示词，显示在新生成区域
+            if hasattr(record, 'temp_new_prompt') and record.temp_new_prompt:
+                self.generated_prompt_edit.setPlainText(record.temp_new_prompt)
+                # 启用通过/拒绝按钮
+                self.approve_btn.setEnabled(True)
+                self.reject_btn.setEnabled(True)
+            else:
+                # 清空新生成区域
+                self.generated_prompt_edit.setPlainText("")
+                # 禁用通过/拒绝按钮
+                self.approve_btn.setEnabled(False)
+                self.reject_btn.setEnabled(False)
             
             # 加载和显示图片预览
             self.load_image_preview(record.filepath)
@@ -819,28 +984,32 @@ class MainWindow(QMainWindow):
             updated = False
             for rec in self.manifest_manager.records:
                 if rec.filepath == rel_path:
-                    rec.prompt_en = prompt
-                    rec.retry_cnt += 1
                     if success:
-                        rec.status = ProcessStatus.PENDING   # 重新进入待审状态
-                        # 自动创建TXT文件
-                        self._create_txt_file_for_record(rec, base)
+                        # 将新生成的提示词保存为临时属性，用于对比
+                        rec.temp_new_prompt = prompt
+                        rec.retry_cnt += 1
+                        
+                        # 更新UI显示 - 显示新旧对比
+                        self.current_prompt_edit.setPlainText(rec.prompt_en)  # 显示原始提示词
+                        self.generated_prompt_edit.setPlainText(prompt)  # 显示新生成的提示词
+                        
+                        # 启用通过/拒绝按钮
+                        self.approve_btn.setEnabled(True)
+                        self.reject_btn.setEnabled(True)
+                    else:
+                        # 失败时清理临时属性
+                        if hasattr(rec, 'temp_new_prompt'):
+                            delattr(rec, 'temp_new_prompt')
                     updated = True
                     break
             
-            if updated:
-                self.manifest_manager.save_to_csv()
-                self.update_image_list()
-            else:
+            if not updated:
                 QMessageBox.warning(self, "警告", f"未找到对应的记录: {rel_path}")
 
-        # 更新UI显示
-        self.generated_prompt_edit.setPlainText(prompt)
-        
         # 显示结果
         if success:
-            self.status_bar.showMessage(f"重新生成成功: {Path(img_path).name}")
-            QMessageBox.information(self, "成功", f"重新生成成功！\n\n文件: {Path(img_path).name}\n提示词长度: {len(prompt)} 字符")
+            self.status_bar.showMessage(f"重新生成成功: {Path(img_path).name} - 请选择通过或拒绝")
+            QMessageBox.information(self, "成功", f"重新生成成功！\n\n文件: {Path(img_path).name}\n提示词长度: {len(prompt)} 字符\n\n请查看新旧提示词对比，然后选择通过或拒绝。")
         else:
             self.status_bar.showMessage("重新生成失败")
             QMessageBox.warning(self, "重新生成失败", f"处理失败:\n{prompt}")
@@ -984,28 +1153,88 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "错误", f"导出失败:\n{e}")
     
     def approve_current_image(self):
-        """通过当前图片"""
+        """通过当前图片 - 使用新生成的提示词"""
         current_item = self.image_list.currentItem()
-        if current_item:
-            record = current_item.data(Qt.UserRole)
+        if not current_item:
+            QMessageBox.warning(self, "警告", "请先选择一张图片")
+            return
+            
+        record = current_item.data(Qt.UserRole)
+        if not record:
+            QMessageBox.warning(self, "警告", "无法获取图片记录")
+            return
+            
+        # 检查是否有新生成的提示词
+        if not hasattr(record, 'temp_new_prompt') or not record.temp_new_prompt:
+            QMessageBox.warning(self, "警告", "没有新生成的提示词可以通过")
+            return
+            
+        try:
+            # 使用新生成的提示词替换原有的
+            record.prompt_en = record.temp_new_prompt
             record.status = ProcessStatus.APPROVED
-            # 更新提示词
-            record.prompt_en = self.generated_prompt_edit.toPlainText()
+            
+            # 创建TXT文件
+            image_folder = self.current_manifest_path.parent if self.current_manifest_path \
+                           else Path(self.folder_path_edit.text().strip())
+            self._create_txt_file_for_record(record, image_folder)
+            
+            # 清理临时属性
+            delattr(record, 'temp_new_prompt')
+            
             # 保存更改
             if self.manifest_manager:
                 self.manifest_manager.save_to_csv()
                 self.update_image_list()
+                
+            # 更新UI显示
+            self.current_prompt_edit.setPlainText(record.prompt_en)
+            self.generated_prompt_edit.setPlainText("")
+            
+            # 禁用通过/拒绝按钮
+            self.approve_btn.setEnabled(False)
+            self.reject_btn.setEnabled(False)
+            
+            self.status_bar.showMessage(f"✅ 已通过新提示词: {record.filepath}")
+            QMessageBox.information(self, "成功", "新提示词已通过并保存！")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"通过提示词时出错:\n{e}")
     
     def reject_current_image(self):
-        """拒绝当前图片"""
+        """拒绝当前图片 - 删除新生成的提示词"""
         current_item = self.image_list.currentItem()
-        if current_item:
-            record = current_item.data(Qt.UserRole)
-            record.status = ProcessStatus.REJECTED
-            # 保存更改
-            if self.manifest_manager:
-                self.manifest_manager.save_to_csv()
-                self.update_image_list()
+        if not current_item:
+            QMessageBox.warning(self, "警告", "请先选择一张图片")
+            return
+            
+        record = current_item.data(Qt.UserRole)
+        if not record:
+            QMessageBox.warning(self, "警告", "无法获取图片记录")
+            return
+            
+        # 检查是否有新生成的提示词
+        if not hasattr(record, 'temp_new_prompt') or not record.temp_new_prompt:
+            QMessageBox.warning(self, "警告", "没有新生成的提示词可以拒绝")
+            return
+            
+        try:
+            # 清理临时属性（拒绝新提示词）
+            delattr(record, 'temp_new_prompt')
+            
+            # 更新UI显示 - 恢复原有提示词
+            self.current_prompt_edit.setPlainText(record.prompt_en)
+            self.generated_prompt_edit.setPlainText("")
+            
+            # 禁用通过/拒绝按钮
+            self.approve_btn.setEnabled(False)
+            self.reject_btn.setEnabled(False)
+            
+            self.status_bar.showMessage(f"❌ 已拒绝新提示词: {record.filepath}")
+            QMessageBox.information(self, "拒绝", "新提示词已拒绝，保留原有提示词。")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"拒绝提示词时出错:\n{e}")
 
     def closeEvent(self, event):
         """窗口关闭事件处理"""
@@ -1055,6 +1284,237 @@ class MainWindow(QMainWindow):
         
         # 清理重新生成线程
         self._cleanup_regen_thread()
+        
+        # 清理批量重新生成线程
+        self._cleanup_batch_regen_thread()
+    
+    def _cleanup_batch_regen_thread(self):
+        """清理批量重新生成线程"""
+        if self.batch_regen_thread:
+            if self.batch_regen_thread.isRunning():
+                self.batch_regen_thread.stop_processing()
+                self.batch_regen_thread.wait(3000)
+            self.batch_regen_thread.deleteLater()
+            self.batch_regen_thread = None
+
+    ############################################
+    # 批量重新生成功能
+    ############################################
+    def on_select_all_changed(self, state):
+        """全选/全不选复选框状态改变"""
+        is_checked = state == Qt.CheckState.Checked
+        
+        for i in range(self.image_list.count()):
+            item = self.image_list.item(i)
+            widget = self.image_list.itemWidget(item)
+            if widget:
+                checkbox = widget.findChild(QCheckBox)
+                if checkbox:
+                    checkbox.setChecked(is_checked)
+    
+    def on_item_checkbox_changed(self):
+        """单个复选框状态改变"""
+        # 更新批量重新生成按钮状态
+        selected_count = self.get_selected_records_count()
+        self.batch_regenerate_btn.setEnabled(selected_count > 0)
+        
+        # 更新全选复选框状态
+        total_count = self.image_list.count()
+        if selected_count == 0:
+            self.select_all_checkbox.setChecked(False)
+        elif selected_count == total_count:
+            self.select_all_checkbox.setChecked(True)
+        else:
+            self.select_all_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
+    
+    def get_selected_records_count(self):
+        """获取选中的记录数量"""
+        count = 0
+        for i in range(self.image_list.count()):
+            item = self.image_list.item(i)
+            widget = self.image_list.itemWidget(item)
+            if widget:
+                checkbox = widget.findChild(QCheckBox)
+                if checkbox and checkbox.isChecked():
+                    count += 1
+        return count
+    
+    def get_selected_records(self):
+        """获取选中的记录列表"""
+        selected_records = []
+        for i in range(self.image_list.count()):
+            item = self.image_list.item(i)
+            widget = self.image_list.itemWidget(item)
+            if widget:
+                checkbox = widget.findChild(QCheckBox)
+                if checkbox and checkbox.isChecked():
+                    record = checkbox.property("record")
+                    if record:
+                        selected_records.append(record)
+        return selected_records
+    
+    def start_batch_regenerate(self):
+        """开始批量重新生成"""
+        # 检查是否有选中的图片
+        selected_records = self.get_selected_records()
+        if not selected_records:
+            QMessageBox.warning(self, "警告", "请先选择要重新生成的图片")
+            return
+        
+        # 检查是否正在处理
+        if (self.batch_regen_thread and self.batch_regen_thread.isRunning()) or \
+           (self.regen_thread and self.regen_thread.isRunning()) or \
+           (self.processing_thread and self.processing_thread.isRunning()):
+            QMessageBox.warning(self, "警告", "有其他任务正在处理中，请稍候...")
+            return
+        
+        # 验证API配置
+        api_key = self.api_key_edit.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "警告", "请先输入 API Key")
+            return
+        
+        # 验证提示词模板
+        user_prompt = self.user_prompt_edit.toPlainText().strip()
+        if not user_prompt:
+            QMessageBox.warning(self, "警告", "请先输入用户提示词模板")
+            return
+        
+        # 构建图片路径列表
+        image_folder = self.current_manifest_path.parent if self.current_manifest_path \
+                       else Path(self.folder_path_edit.text().strip())
+        
+        image_paths = []
+        for record in selected_records:
+            image_path = image_folder / record.filepath
+            if image_path.exists():
+                image_paths.append(image_path)
+            else:
+                QMessageBox.warning(self, "警告", f"图片文件不存在: {image_path}")
+                return
+        
+        # 确认操作
+        reply = QMessageBox.question(
+            self, "确认批量重新生成", 
+            f"确定要重新生成以下 {len(selected_records)} 张图片的提示词吗？\n\n"
+            f"这将为每张图片生成新的提示词用于对比。\n"
+            f"您可以逐个选择通过或拒绝。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        # 启动批量重新生成
+        self._start_batch_regeneration(image_paths, user_prompt)
+    
+    def _start_batch_regeneration(self, image_paths: list, user_prompt: str):
+        """启动批量重新生成过程"""
+        try:
+            # 禁用相关按钮
+            self.batch_regenerate_btn.setEnabled(False)
+            self.regenerate_btn.setEnabled(False)
+            self.execute_btn.setEnabled(False)
+            
+            # 显示进度条
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setMaximum(len(image_paths))
+            self.progress_bar.setValue(0)
+            
+            self.status_bar.showMessage(f"开始批量重新生成 {len(image_paths)} 张图片...")
+            
+            # 创建并启动线程
+            self.batch_regen_thread = BatchRegenerateThread(
+                image_paths=image_paths,
+                prompt_template=user_prompt,
+                system_prompt=self.system_prompt_edit.toPlainText().strip()
+            )
+            
+            # 连接信号
+            self.batch_regen_thread.progress_updated.connect(self.on_batch_regen_progress)
+            self.batch_regen_thread.image_regenerated.connect(self.on_batch_regen_image_done)
+            self.batch_regen_thread.batch_finished.connect(self.on_batch_regen_finished)
+            self.batch_regen_thread.error_occurred.connect(self.on_batch_regen_error)
+            
+            # 启动线程
+            self.batch_regen_thread.start()
+            
+        except Exception as e:
+            # 恢复按钮状态
+            self.batch_regenerate_btn.setEnabled(True)
+            self.regenerate_btn.setEnabled(True)
+            self.execute_btn.setEnabled(True)
+            self.progress_bar.setVisible(False)
+            QMessageBox.critical(self, "启动失败", f"无法启动批量重新生成过程:\n{e}")
+    
+    def on_batch_regen_progress(self, current: int, total: int, current_image: str):
+        """批量重新生成进度更新"""
+        self.progress_bar.setValue(current)
+        self.status_bar.showMessage(f"正在处理 ({current}/{total}): {current_image}")
+    
+    def on_batch_regen_image_done(self, img_path: str, prompt: str, success: bool):
+        """批量重新生成单张图片完成"""
+        # 找到对应的记录并更新
+        base = self.current_manifest_path.parent if self.current_manifest_path \
+               else Path(self.folder_path_edit.text().strip())
+        
+        try:
+            rel_path = str(Path(img_path).relative_to(base))
+        except Exception:
+            rel_path = Path(img_path).name
+        
+        if self.manifest_manager:
+            for rec in self.manifest_manager.records:
+                if rec.filepath == rel_path:
+                    if success:
+                        # 保存新生成的提示词为临时属性
+                        rec.temp_new_prompt = prompt
+                        rec.retry_cnt += 1
+                        print(f"✅ 批量重新生成成功: {rel_path}")
+                    else:
+                        print(f"❌ 批量重新生成失败: {rel_path} - {prompt}")
+                    break
+    
+    def on_batch_regen_finished(self, success_count: int, total_count: int):
+        """批量重新生成完成"""
+        # 恢复按钮状态
+        self.batch_regenerate_btn.setEnabled(True)
+        self.regenerate_btn.setEnabled(True)
+        self.execute_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        
+        # 更新图片列表显示
+        self.update_image_list()
+        
+        # 显示完成消息
+        self.status_bar.showMessage(f"批量重新生成完成: {success_count}/{total_count} 成功")
+        QMessageBox.information(
+            self, "批量重新生成完成", 
+            f"批量重新生成完成！\n\n"
+            f"成功: {success_count} 张\n"
+            f"失败: {total_count - success_count} 张\n"
+            f"总计: {total_count} 张\n\n"
+            f"请在图片列表中逐个查看并选择通过或拒绝新生成的提示词。"
+        )
+        
+        # 清理线程
+        self._cleanup_batch_regen_thread()
+    
+    def on_batch_regen_error(self, error_message: str):
+        """批量重新生成错误处理"""
+        # 恢复按钮状态
+        self.batch_regenerate_btn.setEnabled(True)
+        self.regenerate_btn.setEnabled(True)
+        self.execute_btn.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        
+        # 显示错误
+        self.status_bar.showMessage("批量重新生成失败")
+        QMessageBox.critical(self, "批量重新生成错误", error_message)
+        
+        # 清理线程
+        self._cleanup_batch_regen_thread()
 
 
 def run_gui():

@@ -1,7 +1,5 @@
-The image features an elderly individual dressed in traditional East Asian attire, likely from a historical or ceremonial context. The person is positioned centrally within the frame, standing against a plain, light gray backdrop that provides a stark contrast to the rich colors and intricate details of the clothing.
+中文提示词：
+这张图片展示了一位身穿古代服饰的人物。人物头戴精致的金色冠冕，冠冕上镶嵌着一颗珍珠，显得庄重而威严。人物身穿深红色的长袍，外披黑色绣有金色花纹的披肩，整体服饰显得高贵典雅。背景为单一的灰色，突出人物的主体地位，使观者的注意力集中在服饰和人物本身。构图简洁，人物居中站立，给人一种肃穆和庄重的感觉。
 
-The individual wears a dark, possibly black, headdress adorned with ornate gold embroidery and a prominent pearl or gem at the center. This headdress is complemented by a dark, possibly black, robe or overcoat with elaborate gold embroidery along the shoulders and edges. The embroidery features swirling, cloud-like patterns, adding a sense of elegance and regality to the attire.
-
-Underneath the dark overcoat, the person wears a deep maroon or burgundy robe, which is visible at the neck and sleeves. The robe appears to be made of a rich, textured fabric, possibly silk or brocade, which enhances the overall luxurious appearance. A dark belt or sash cinches the waist, further defining the silhouette.
-
-The individual's hair is white, suggesting advanced age, and is neatly styled, possibly pulled back or covered by the headdress. The overall composition of the image is symmetrical and formal, emphasizing the dignity and solemnity of the attire and the individual wearing it. The lighting is even and soft, minimizing shadows and highlighting the details of the clothing and headdress. The simplicity of the background ensures that the focus remains entirely on the subject and their attire.
+英文提示词：
+This image depicts a person dressed in traditional ancient attire. The individual wears an ornate golden crown adorned with a pearl, exuding a sense of solemnity and authority. The person is clad in a deep red robe, overlaid with a black shawl embroidered with golden patterns, giving an overall impression of nobility and elegance. The background is a plain grey, which emphasizes the subject and draws the viewer's attention to the attire and the person. The composition is simple, with the person standing centrally, conveying a sense of dignity and solemnity.

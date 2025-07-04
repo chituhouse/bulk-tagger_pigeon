@@ -1,9 +1,7 @@
-The image depicts a side profile of an elderly figure dressed in traditional East Asian attire, likely from a historical or ceremonial context. The individual is adorned in a layered ensemble featuring a dark, possibly black, outer robe or vestment that extends to the ankles. This outer garment is richly decorated with intricate gold embroidery, particularly noticeable on the shoulder and lower sections, suggesting a high status or official capacity.
+这张图片展示了一位身穿传统服饰的老年男性形象。他的服饰主要由深红色和黑色组成，外套上有金色的刺绣图案，显得庄重而典雅。他头戴一顶黑色的高帽，帽子上也有金色的装饰，整体造型具有浓厚的历史和文化气息。
 
-Beneath the outer robe, the figure wears a deep maroon or burgundy inner robe, which is visible at the sleeves and hem. The inner robe appears to be made of a different, possibly lighter, fabric than the outer layer, adding depth and contrast to the attire. The sleeves of the inner robe are voluminous, contributing to the overall dignified and formal appearance.
+中文提示词：
+这张图片展示了一位身穿传统服饰的老年男性形象。他的服饰主要由深红色和黑色组成，外套上有金色的刺绣图案，显得庄重而典雅。他头戴一顶黑色的高帽，帽子上也有金色的装饰，整体造型具有浓厚的历史和文化气息。
 
-The headwear is a distinctive black hat with elaborate gold embellishments, including a prominent circular ornament at the front. This type of headgear is often associated with scholars, officials, or nobility in historical East Asian cultures. The hat also features a small white spherical element, possibly a decorative bead or symbol of rank.
-
-The figure's hair is white, indicating advanced age, and is styled in a manner that complements the traditional attire, with the hair pulled back and possibly tied or secured under the hat. The footwear is simple and dark, likely black, with a white sole, maintaining the overall formal and traditional aesthetic.
-
-The composition of the image is clean and focused, with the figure positioned against a plain white background, which emphasizes the details of the attire and the dignified posture of the individual. The lighting is even and soft, highlighting the textures and colors of the clothing without creating harsh shadows. The side profile view allows for a clear observation of the attire's design and the figure's serene and composed demeanor.
+英文提示词：
+This image depicts an elderly man dressed in traditional attire. His outfit is primarily composed of deep red and black, with gold embroidered patterns on the outer garment, giving it a dignified and elegant appearance. He wears a tall black hat adorned with gold decorations, and the overall style exudes a strong sense of history and cultural heritage.
