@@ -27,9 +27,22 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: 完成安装
-echo [3/4] 安装完成。接下来将启动图形界面。
+:: 创建桌面快捷方式
+echo [3/4] 正在创建桌面快捷方式...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$W = New-Object -ComObject WScript.Shell; ^
+     $Desk = $W.SpecialFolders['Desktop']; ^
+     $Lnk = $W.CreateShortcut($Desk + '\\MiniMax Tagger.lnk'); ^
+     $Lnk.TargetPath = '%~dp0run_gui.bat'; ^
+     $Lnk.IconLocation = '%~dp0resources\\minimax_tagger.ico'; ^
+     $Lnk.WorkingDirectory = '%~dp0'; ^
+     $Lnk.Save()"
+
+echo 已在桌面创建 "MiniMax Tagger" 图标，双击即可启动！
+
+:: 完成安装并启动 GUI
+echo [4/4] 启动图形界面...
 python -m minimax_tagger.gui
 
-echo [4/4] 程序已退出。如需再次启动，请双击 run_gui.bat
+echo 程序已退出。如需再次启动，请双击桌面图标或 run_gui.bat
 pause 

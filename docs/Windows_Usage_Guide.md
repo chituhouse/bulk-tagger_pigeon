@@ -1,5 +1,11 @@
 # MiniMax Tagger Windows 使用指南
 
+## 0.1.1 更新
+
+- 安装脚本将自动在桌面创建 `MiniMax Tagger` 图标，双击即可启动 GUI。
+
+---
+
 ## 1. 环境准备
 
 1. 安装 **Python 3.10+**（建议 3.10/3.11）：

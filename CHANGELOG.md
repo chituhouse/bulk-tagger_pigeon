@@ -51,3 +51,13 @@
 ### Removed
 - 旧版自动即时写 TXT 的实现。
 - 多个调试脚本与临时文档已归档到 `docs/archive/`。 
+
+## 0.1.1 – 2025-07-09
+
+### Added
+- `windows_install.bat` 现自动创建桌面快捷方式（MiniMax Tagger.lnk）。
+
+### Fixed
+- 更新文档与脚本中的版本号显示。
+
+--- 
