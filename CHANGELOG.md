@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0 – 2025-07-09
+
+### Added
+- 新增 `docs/Windows_Usage_Guide.md`，提供详尽的 Windows 安装与使用说明。
+- Windows 一键安装脚本 `windows_install.bat`、`run_gui.bat`、`run_cli.bat`。
+- 精简发布包 `MiniMax_Tagger_Win.zip` 供无开发经验的用户直接下载使用。
+
+### Changed
+- README 更新版本号并加入 Windows 快速安装提示。
+- `__init__.py` 版本号调整至 `0.1.0`。
+
+### Notes
+- 作为首次对外预发布版本，主功能已全部通过测试。
+- 后续版本将合并此前 0.8.x / 0.9.x 内测改动，以语义化版本号重新整理。
+
 ## 0.9.0 – 2025-07-04
 
 ### Added

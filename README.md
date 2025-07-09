@@ -1,4 +1,6 @@
-# MiniMax Tagger GUI 0.8.9
+# MiniMax Tagger GUI 0.1.0
+
+> ⚠️ **全新 Windows 免配置安装脚本已内置！** 双击 `windows_install.bat` 即可完成安装并启动 GUI。
 
 > 一个专注 **LoRA / Stable-Diffusion** 训练数据集制作的开源图形界面工具。支持批量上传图片到 MiniMax 视觉大模型，自动生成高质量英文 Prompt，并在审阅后一键导出 TXT。
 
